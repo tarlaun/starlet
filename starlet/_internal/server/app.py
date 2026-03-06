@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from time import perf_counter
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import json
 import logging
@@ -15,6 +15,9 @@ from flask_cors import CORS
 
 from .tiler.tiler import VectorTiler
 from .download_service import DatasetFeatureService
+from .catalog.embedder import GeminiTextEmbedder
+from .catalog.index import CATALOG_FILENAME, load_catalog_index
+from .catalog.router import retrieve_top_k
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +58,126 @@ def create_app(
     tiler_cache: dict[str, VectorTiler] = {}
     feature_service = DatasetFeatureService(data_root)
 
+    _catalog_cache: Dict[str, Any] = {
+        "index": None,
+        "mtime": None,
+        "embedder": None,
+    }
+
     def get_tiler(dataset: str) -> VectorTiler:
         if dataset not in tiler_cache:
             tiler_cache[dataset] = VectorTiler(str(data_root / dataset), memory_cache_size=cache_size)
         return tiler_cache[dataset]
+
+    def _extract_first_json_array(text: str) -> List[Any]:
+        cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
+        match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+        if not match:
+            raise ValueError("No JSON array found in LLM response")
+        parsed = json.loads(match.group())
+        if not isinstance(parsed, list):
+            raise ValueError("Expected JSON array from LLM response")
+        return parsed
+
+    def _extract_first_json_object(text: str) -> Dict[str, Any]:
+        cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end < 0 or end < start:
+            raise ValueError("No JSON object found in LLM response")
+        parsed = json.loads(cleaned[start:end + 1])
+        if not isinstance(parsed, dict):
+            raise ValueError("Expected JSON object from LLM response")
+        return parsed
+
+    def _load_stats_for_dataset(dataset: str) -> Dict[str, Any]:
+        dataset_path = data_root / dataset
+        if not dataset_path.is_dir():
+            raise FileNotFoundError(f"Dataset not found: {dataset}")
+
+        stats_path = dataset_path / "stats" / "attributes.json"
+        if not stats_path.exists():
+            raise FileNotFoundError(f"Stats not found for dataset: {dataset}")
+
+        with open(stats_path, "r") as f:
+            return json.load(f)
+
+    def _generate_styles_from_stats(
+        dataset: str,
+        stats: Dict[str, Any],
+        requested_features: Optional[List[str]] = None,
+        instruction_override: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        attributes = stats.get("attributes", [])
+        if not attributes:
+            return []
+
+        if requested_features:
+            attr_subset = [a for a in attributes if a.get("name") in requested_features]
+            if instruction_override:
+                instruction = instruction_override
+            else:
+                instruction = (
+                    "Generate styling suggestions for these specific attributes: "
+                    + ", ".join(requested_features)
+                )
+        else:
+            attr_subset = attributes
+            if instruction_override:
+                instruction = instruction_override
+            else:
+                instruction = "Analyze all attributes and suggest the best styling rules for map visualization."
+
+        if not attr_subset:
+            return []
+
+        prompt_path = Path(__file__).parent / "llm" / "prompt.md"
+        prompt_template = prompt_path.read_text()
+
+        prompt = prompt_template.replace(
+            "{{ATTRIBUTES_JSON}}", json.dumps(attr_subset, indent=2)
+        ).replace(
+            "{{INSTRUCTION}}", instruction
+        )
+
+        from .llm.factory import LLMFactory
+
+        provider = LLMFactory.get_default_provider()
+        raw = provider.generate_response(prompt)
+        styles = _extract_first_json_array(raw)
+
+        if not isinstance(styles, list):
+            return []
+        return styles
+
+    def _get_catalog_index() -> Dict[str, Any]:
+        index_path = data_root / "_catalog" / CATALOG_FILENAME
+        if not index_path.exists():
+            raise FileNotFoundError(
+                f"Catalogue index not found at {index_path}. "
+                f"Build it first with catalog/index.py."
+            )
+
+        mtime = index_path.stat().st_mtime
+        if _catalog_cache["index"] is None or _catalog_cache["mtime"] != mtime:
+            _catalog_cache["index"] = load_catalog_index(index_path)
+            _catalog_cache["mtime"] = mtime
+        return _catalog_cache["index"]
+
+    def _get_catalog_embedder() -> GeminiTextEmbedder:
+        if _catalog_cache["embedder"] is None:
+            _catalog_cache["embedder"] = GeminiTextEmbedder()
+        return _catalog_cache["embedder"]
+
+    def _candidate_payload_for_llm(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        payload = []
+        for c in candidates:
+            payload.append({
+                "dataset": c.get("dataset"),
+                "score": round(float(c.get("score", 0.0)), 6),
+                "summary": c.get("summary"),
+            })
+        return payload
 
     @app.get("/<dataset>/<int:z>/<int:x>/<int:y>.mvt")
     def serve_tile(dataset, z, x, y):
@@ -243,78 +362,139 @@ def create_app(
         empty = json.dumps([])
         json_ct = {"Content-Type": "application/json"}
 
-        # Validate dataset
-        dataset_path = data_root / dataset
-        if not dataset_path.is_dir():
-            return empty, 200, json_ct
-
-        # Load attributes.json
-        stats_path = dataset_path / "stats" / "attributes.json"
-        if not stats_path.exists():
-            return empty, 200, json_ct
-
         try:
-            with open(stats_path) as f:
-                stats = json.load(f)
-        except Exception:
-            return empty, 200, json_ct
-
-        attributes = stats.get("attributes", [])
-        if not attributes:
-            return empty, 200, json_ct
-
-        # Determine mode: targeted (features list provided) vs auto (all attributes)
-        body = request.get_json(silent=True) or {}
-        requested_features = body.get("features")
-
-        if requested_features:
-            attr_subset = [a for a in attributes if a["name"] in requested_features]
-            instruction = (
-                "Generate styling suggestions for these specific attributes: "
-                + ", ".join(requested_features)
+            body = request.get_json(silent=True) or {}
+            requested_features = body.get("features")
+            stats = _load_stats_for_dataset(dataset)
+            styles = _generate_styles_from_stats(
+                dataset=dataset,
+                stats=stats,
+                requested_features=requested_features,
             )
-        else:
-            attr_subset = attributes
-            instruction = "Analyze all attributes and suggest the best styling rules for map visualization."
-
-        if not attr_subset:
+            return json.dumps(styles), 200, json_ct
+        except Exception as e:
+            logger.error("[Styles] Failed for %s: %s", dataset, e)
             return empty, 200, json_ct
 
-        # Load prompt template
-        prompt_path = Path(__file__).parent / "llm" / "prompt.md"
+    @app.post("/api/query-styles")
+    def query_styles():
+        json_ct = {"Content-Type": "application/json"}
+        body = request.get_json(silent=True) or {}
+
+        user_query = str(body.get("query", "")).strip()
+        if not user_query:
+            return json.dumps({"error": "Request body must include a non-empty 'query'"}), 400, json_ct
+
+        requested_k = body.get("k", 5)
         try:
-            prompt_template = prompt_path.read_text()
+            k = max(1, min(int(requested_k), 10))
         except Exception:
-            return empty, 200, json_ct
+            k = 5
 
-        prompt = prompt_template.replace(
-            "{{ATTRIBUTES_JSON}}", json.dumps(attr_subset, indent=2)
-        ).replace(
-            "{{INSTRUCTION}}", instruction
-        )
-
-        # Call LLM
         try:
+            catalog_index = _get_catalog_index()
+            embedder = _get_catalog_embedder()
+            candidates = retrieve_top_k(
+                query=user_query,
+                catalog_index=catalog_index,
+                embedder=embedder,
+                k=k,
+            )
+        except FileNotFoundError as e:
+            return json.dumps({"error": str(e)}), 503, json_ct
+        except Exception as e:
+            logger.exception("[QueryStyles] Failed during catalogue retrieval")
+            return json.dumps({"error": f"Catalogue retrieval failed: {e}"}), 500, json_ct
+
+        if not candidates:
+            return json.dumps({"error": "No indexed datasets available"}), 404, json_ct
+
+        candidate_payload = _candidate_payload_for_llm(candidates)
+
+        try:
+            prompt_path = Path(__file__).parent / "llm" / "query_routing_prompt.md"
+            prompt_template = prompt_path.read_text()
+            prompt = prompt_template.replace(
+                "{{USER_QUERY}}", user_query
+            ).replace(
+                "{{CANDIDATES_JSON}}", json.dumps(candidate_payload, indent=2)
+            )
+
             from .llm.factory import LLMFactory
+
             provider = LLMFactory.get_default_provider()
             raw = provider.generate_response(prompt)
+            routing = _extract_first_json_object(raw)
         except Exception as e:
-            logger.error("[Styles] LLM call failed for %s: %s", dataset, e)
-            return empty, 200, json_ct
+            logger.exception("[QueryStyles] LLM dataset routing failed")
+            return json.dumps({"error": f"LLM dataset routing failed: {e}"}), 500, json_ct
 
-        # Parse JSON array from response
+        candidate_by_name = {c["dataset"]: c for c in candidates}
+        selected_dataset = routing.get("selected_dataset")
+        if selected_dataset not in candidate_by_name:
+            logger.warning(
+                "[QueryStyles] LLM selected invalid dataset '%s'; falling back to top candidate",
+                selected_dataset,
+            )
+            selected_dataset = candidates[0]["dataset"]
+
+        selected_attributes = routing.get("selected_attributes")
+        if not isinstance(selected_attributes, list):
+            selected_attributes = []
+
         try:
-            cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
-            match = re.search(r"\[.*\]", cleaned, re.DOTALL)
-            if not match:
-                return empty, 200, json_ct
-            styles = json.loads(match.group())
-            if not isinstance(styles, list):
-                return empty, 200, json_ct
-        except Exception as e:
-            logger.error("[Styles] Failed to parse LLM response for %s: %s", dataset, e)
-            return empty, 200, json_ct
+            stats = _load_stats_for_dataset(selected_dataset)
+            available_attributes = {
+                attr.get("name")
+                for attr in (stats.get("attributes") or [])
+                if isinstance(attr, dict)
+            }
+            filtered_attributes = [
+                a for a in selected_attributes
+                if isinstance(a, str) and a in available_attributes
+            ]
 
-        return json.dumps(styles), 200, json_ct
+            style_intent = str(routing.get("style_intent", "")).strip()
+            reason = str(routing.get("reason", "")).strip()
+
+            if filtered_attributes:
+                instruction = (
+                    f"User query: {user_query}\n"
+                    f"Routing reason: {reason}\n"
+                    f"Style intent: {style_intent}\n"
+                    f"Generate styling suggestions for these specific attributes: "
+                    + ", ".join(filtered_attributes)
+                )
+            else:
+                instruction = (
+                    f"User query: {user_query}\n"
+                    f"Routing reason: {reason}\n"
+                    f"Style intent: {style_intent}\n"
+                    f"Analyze the dataset and suggest the best styling rules for map visualization."
+                )
+
+            styles = _generate_styles_from_stats(
+                dataset=selected_dataset,
+                stats=stats,
+                requested_features=filtered_attributes or None,
+                instruction_override=instruction,
+            )
+        except Exception as e:
+            logger.exception("[QueryStyles] Final style generation failed")
+            return json.dumps({"error": f"Final style generation failed: {e}"}), 500, json_ct
+
+        response = {
+            "query": user_query,
+            "top_k": candidate_payload,
+            "routing": {
+                "selected_dataset": selected_dataset,
+                "reason": routing.get("reason"),
+                "selected_attributes": filtered_attributes,
+                "style_intent": routing.get("style_intent"),
+                "selected_dataset_score": candidate_by_name[selected_dataset]["score"],
+            },
+            "styles": styles,
+        }
+        return json.dumps(response, indent=2), 200, json_ct
 
     return app
