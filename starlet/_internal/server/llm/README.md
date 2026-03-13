@@ -1,19 +1,17 @@
 # LLM Integration
 
 This package provides a provider-agnostic interface for calling large language
-models. It is used by the styles endpoint to generate map styling suggestions
-from dataset attribute statistics.
+models. It is used by the styles endpoint to generate and iteratively refine
+map styling suggestions from dataset attribute statistics.
 
 ## Architecture
 
-```
-provider.py          — ABC: LLMProvider.generate_response(prompt) -> str
-gemini_provider.py   — Google Gemini (REST API, no SDK)
-ollama_provider.py   — Local Ollama instance (REST API, no SDK)
+```text
+provider.py          — ABC + normalized response model
+gemini_provider.py   — Google Gemini Interactions API (stateful multi-turn)
+ollama_provider.py   — Local Ollama instance (stateless fallback)
 factory.py           — LLMFactory: provider registry + env-var selection
-suggestions.py       — High-level helper used by the styles endpoint
-prompt.md            — Prompt template sent to the LLM
-```
+suggestions.py       — High-level style conversation helpers
 
 All providers implement the `LLMProvider` abstract class and raise
 `LLMProviderError` on failure. The rest of the server never imports a concrete

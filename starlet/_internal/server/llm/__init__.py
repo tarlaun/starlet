@@ -1,13 +1,21 @@
-from .provider import LLMProvider
+from .provider import LLMProvider, LLMProviderError, LLMResponse
 from .gemini_provider import GeminiProvider
 from .ollama_provider import OllamaProvider
 from .factory import LLMFactory
-from .suggestions import generate_dataset_html_suggestions
+from .suggestions import (
+    StyleConversationResult,
+    continue_style_conversation,
+    start_style_conversation,
+)
 
 __all__ = [
     "LLMProvider",
+    "LLMProviderError",
+    "LLMResponse",
     "GeminiProvider",
     "OllamaProvider",
     "LLMFactory",
-    "generate_dataset_html_suggestions",
+    "StyleConversationResult",
+    "start_style_conversation",
+    "continue_style_conversation",
 ]

@@ -1,337 +1,1022 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<title>Starlet</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<style>
-  *, *::before, *::after {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-  }
+  <meta charset="utf-8" />
+  <title>Starlet Chat Styling</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  :root {
-    --bg: #0f1117;
-    --surface: #1a1d27;
-    --surface-hover: #242836;
-    --border: #2a2e3a;
-    --text: #e1e4eb;
-    --text-muted: #8b8fa3;
-    --accent: #6c72cb;
-    --accent-light: #8b8fd8;
-    --tag-polygon: #2d6a4f;
-    --tag-point: #7b2cbf;
-    --tag-line: #d4740e;
-    --tag-default: #3a3e4a;
-  }
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v9.2.4/ol.css" />
 
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-  }
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
 
-  /* ── Header ── */
-  .header {
-    border-bottom: 1px solid var(--border);
-    padding: 20px 32px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 24px;
-    flex-wrap: wrap;
-  }
+    :root {
+      --bg: #0f1117;
+      --surface: #171b24;
+      --surface-2: #1e2430;
+      --surface-3: #242c3a;
+      --border: #2d3648;
+      --text: #e8edf5;
+      --muted: #94a0b4;
+      --accent: #6f8cff;
+      --accent-2: #8aa1ff;
+      --danger: #ff6b6b;
+      --shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+    }
 
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
 
-  .logo {
-    width: 32px;
-    height: 32px;
-    background: var(--accent);
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 16px;
-    font-weight: 700;
-    color: white;
-    flex-shrink: 0;
-  }
+    body {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100vh;
+    }
 
-  .brand {
-    font-size: 20px;
-    font-weight: 600;
-    letter-spacing: -0.3px;
-  }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(15, 17, 23, 0.96);
+      backdrop-filter: blur(10px);
+    }
 
-  .search-wrapper {
-    position: relative;
-    width: 320px;
-    flex-shrink: 0;
-  }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
 
-  .search-icon {
-    position: absolute;
-    left: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    color: var(--text-muted);
-    font-size: 14px;
-    pointer-events: none;
-  }
+    .logo {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), #4fd1c5);
+      display: grid;
+      place-items: center;
+      color: white;
+      font-weight: 800;
+      box-shadow: var(--shadow);
+      flex: 0 0 auto;
+    }
 
-  #searchInput {
-    width: 100%;
-    padding: 9px 12px 9px 36px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-size: 14px;
-    outline: none;
-    transition: border-color 0.2s;
-  }
+    .brand-copy {
+      min-width: 0;
+    }
 
-  #searchInput::placeholder { color: var(--text-muted); }
-  #searchInput:focus { border-color: var(--accent); }
+    .brand-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
 
-  /* ── Main ── */
-  .main {
-    max-width: 1120px;
-    margin: 0 auto;
-    padding: 32px;
-  }
+    .brand-subtitle {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
 
-  .summary {
-    color: var(--text-muted);
-    font-size: 14px;
-    margin-bottom: 20px;
-  }
+    .top-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
 
-  .summary strong {
-    color: var(--text);
-  }
+    button {
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 9px 12px;
+      font: inherit;
+      cursor: pointer;
+      transition: 0.18s ease;
+    }
 
-  /* ── Dataset Grid ── */
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 16px;
-  }
+    button:hover {
+      background: var(--surface-3);
+      border-color: var(--accent);
+    }
 
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 20px;
-    text-decoration: none;
-    color: var(--text);
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    transition: background 0.15s, border-color 0.15s;
-  }
+    button.primary {
+      background: var(--accent);
+      color: white;
+      border-color: transparent;
+    }
 
-  .card:hover {
-    background: var(--surface-hover);
-    border-color: var(--accent);
-  }
+    button.primary:hover {
+      background: var(--accent-2);
+    }
 
-  .card-top {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-  }
+    .layout {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 390px minmax(0, 1fr);
+    }
 
-  .card-name {
-    font-size: 15px;
-    font-weight: 600;
-    word-break: break-word;
-  }
+    .sidebar {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto auto auto 1fr auto;
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+    }
 
-  .tag {
-    font-size: 11px;
-    font-weight: 500;
-    padding: 3px 8px;
-    border-radius: 4px;
-    white-space: nowrap;
-    flex-shrink: 0;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
+    .panel {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+    }
 
-  .tag-polygon  { background: var(--tag-polygon); color: #b7e4c7; }
-  .tag-point    { background: var(--tag-point);   color: #e0aaff; }
-  .tag-line     { background: var(--tag-line);    color: #ffe0b2; }
-  .tag-default  { background: var(--tag-default); color: var(--text-muted); }
+    .panel h2, .panel h3 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
 
-  .card-meta {
-    display: flex;
-    gap: 16px;
-    font-size: 13px;
-    color: var(--text-muted);
-  }
+    .status-grid {
+      display: grid;
+      gap: 10px;
+    }
 
-  .card-meta span {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
+    .status-card {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+    }
 
-  .arrow {
-    color: var(--text-muted);
-    font-size: 18px;
-    margin-left: auto;
-    align-self: center;
-    transition: transform 0.15s, color 0.15s;
-  }
+    .status-label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-bottom: 4px;
+    }
 
-  .card:hover .arrow {
-    transform: translateX(3px);
-    color: var(--accent-light);
-  }
+    .status-value {
+      font-size: 13px;
+      word-break: break-word;
+    }
 
-  /* ── States ── */
-  .state-msg {
-    text-align: center;
-    padding: 60px 20px;
-    color: var(--text-muted);
-    font-size: 14px;
-  }
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
 
-  .state-msg .icon {
-    font-size: 32px;
-    margin-bottom: 12px;
-    display: block;
-  }
+    .chip {
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: 0.18s ease;
+    }
 
-  .spinner {
-    width: 24px;
-    height: 24px;
-    border: 3px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    margin: 0 auto 12px;
-  }
+    .chip:hover {
+      border-color: var(--accent);
+      background: var(--surface-3);
+    }
 
-  @keyframes spin { to { transform: rotate(360deg); } }
+    .chat-log {
+      min-height: 0;
+      overflow: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: #131823;
+    }
 
-  @media (max-width: 600px) {
-    .header { padding: 16px; }
-    .search-wrapper { width: 100%; }
-    .main { padding: 20px 16px; }
-    .grid { grid-template-columns: 1fr; }
-  }
-</style>
+    .msg {
+      max-width: 92%;
+      border-radius: 14px;
+      padding: 11px 12px;
+      box-shadow: var(--shadow);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .msg.user {
+      align-self: flex-end;
+      background: linear-gradient(135deg, var(--accent), #5979ff);
+      color: white;
+      border-bottom-right-radius: 6px;
+    }
+
+    .msg.assistant {
+      align-self: flex-start;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 6px;
+    }
+
+    .msg .meta {
+      display: block;
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.72);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .msg.assistant .meta {
+      color: var(--muted);
+    }
+
+    .chat-input {
+      padding: 14px 16px 16px;
+      background: var(--surface);
+    }
+
+    .chat-input textarea {
+      width: 100%;
+      min-height: 86px;
+      max-height: 180px;
+      resize: vertical;
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      font: inherit;
+      outline: none;
+      transition: border-color 0.18s ease, background 0.18s ease;
+    }
+
+    .chat-input textarea:focus {
+      border-color: var(--accent);
+      background: #21293a;
+    }
+
+    .chat-actions {
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .helper {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .map-area {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 1fr auto;
+      background: #0d121b;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+      min-height: 420px;
+    }
+
+    .map-footer {
+      border-top: 1px solid var(--border);
+      background: rgba(15, 17, 23, 0.94);
+      padding: 14px 18px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      gap: 16px;
+    }
+
+    .style-box, .candidates-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      min-height: 130px;
+    }
+
+    .style-box h3, .candidates-box h3 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+    }
+
+    .style-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .kv {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 9px 10px;
+    }
+
+    .kv .k {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-bottom: 3px;
+    }
+
+    .kv .v {
+      font-size: 13px;
+      word-break: break-word;
+    }
+
+    .swatches {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      min-height: 22px;
+    }
+
+    .swatch {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      border: 2px solid rgba(255, 255, 255, 0.15);
+      box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+    }
+
+    .candidate-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .candidate-item {
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .candidate-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 4px;
+    }
+
+    .candidate-name {
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .candidate-score {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .candidate-desc {
+      color: var(--muted);
+      font-size: 12px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      max-width: 360px;
+      background: #17202d;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 12px;
+      padding: 12px 14px;
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: 0.2s ease;
+      z-index: 30;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .toast.error {
+      border-color: rgba(255, 107, 107, 0.4);
+    }
+
+    @media (max-width: 1100px) {
+      .layout {
+        grid-template-columns: 370px minmax(0, 1fr);
+      }
+
+      .map-footer {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 880px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .chat-log {
+        max-height: 280px;
+      }
+    }
+  </style>
 </head>
-
 <body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">S</div>
+      <div class="brand-copy">
+        <div class="brand-title">Starlet</div>
+        <div class="brand-subtitle">Start with a prompt. Gemini will choose a dataset, attribute, and style, then draw it on the map.</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="resetChatBtn">Reset conversation</button>
+      <button id="fitLayerBtn">Fit layer</button>
+    </div>
+  </header>
 
-<header class="header">
-  <div class="header-left">
-    <div class="logo">S</div>
-    <span class="brand">Starlet</span>
+  <div class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Current state</h2>
+        <div class="status-grid">
+          <div class="status-card">
+            <div class="status-label">Selected dataset</div>
+            <div id="selectedDatasetValue" class="status-value">None</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Selected attribute</div>
+            <div id="selectedAttributeValue" class="status-value">None</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Interaction id</div>
+            <div id="interactionIdValue" class="status-value">None</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Try prompts</h2>
+        <div class="chip-row">
+          <button class="chip suggestion-chip" data-prompt="color the roads based on speed limit">Roads by speed limit</button>
+          <button class="chip suggestion-chip" data-prompt="change the color theme to be red to green instead">Red to green theme</button>
+          <button class="chip suggestion-chip" data-prompt="make the lines thinner">Make lines thinner</button>
+          <button class="chip suggestion-chip" data-prompt="actually color by road_class instead">Switch to road_class</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Dataset note</h2>
+        <div class="status-card">
+          <div class="status-label">Startup mode</div>
+          <div class="status-value">No dataset is loaded initially. The first prompt chooses and loads one.</div>
+        </div>
+      </section>
+
+      <section id="chatLog" class="chat-log"></section>
+
+      <section class="chat-input">
+        <textarea id="chatInput" placeholder="Try: color the roads based on speed limit"></textarea>
+        <div class="chat-actions">
+          <div class="helper">The first turn runs retrieval. Follow-ups continue the same style conversation.</div>
+          <div style="display:flex; gap:10px;">
+            <button id="clearInputBtn">Clear</button>
+            <button id="sendBtn" class="primary">Send</button>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <main class="map-area">
+      <div id="map"></div>
+
+      <div class="map-footer">
+        <section class="style-box">
+          <h3>Applied style</h3>
+          <div class="style-grid">
+            <div class="kv">
+              <div class="k">Dataset</div>
+              <div class="v" id="styleDatasetValue">None</div>
+            </div>
+            <div class="kv">
+              <div class="k">Attribute</div>
+              <div class="v" id="styleAttributeValue">None</div>
+            </div>
+            <div class="kv">
+              <div class="k">Style type</div>
+              <div class="v" id="styleTypeValue">None</div>
+            </div>
+            <div class="kv">
+              <div class="k">Legend title</div>
+              <div class="v" id="legendTitleValue">None</div>
+            </div>
+          </div>
+
+          <div class="kv" style="margin-bottom:10px;">
+            <div class="k">Palette</div>
+            <div id="swatches" class="swatches"></div>
+          </div>
+
+          <div class="kv">
+            <div class="k">Renderer details</div>
+            <div class="v" id="rendererDetailsValue">No style applied yet.</div>
+          </div>
+        </section>
+
+        <section class="candidates-box">
+          <h3>Top candidate datasets</h3>
+          <div id="candidateList" class="candidate-list">
+            <div class="empty">No retrieval yet.</div>
+          </div>
+        </section>
+      </div>
+    </main>
   </div>
-  <div class="search-wrapper">
-    <span class="search-icon">&#x1F50D;</span>
-    <input type="text" id="searchInput" placeholder="Search datasets..." autocomplete="off" />
-  </div>
-</header>
 
-<main class="main">
-  <div id="summary" class="summary"></div>
-  <div id="content">
-    <div class="state-msg"><div class="spinner"></div>Loading datasets...</div>
-  </div>
-</main>
+  <div id="toast" class="toast"></div>
 
-<script>
-  const contentDiv  = document.getElementById('content');
-  const summaryDiv  = document.getElementById('summary');
-  const searchInput = document.getElementById('searchInput');
-  let allDatasets   = [];
+  <script src="https://cdn.jsdelivr.net/npm/ol@v9.2.4/dist/ol.js"></script>
+  <script>
+    const state = {
+      interactionId: "",
+      currentDataset: "",
+      currentAttributes: [],
+      currentStyle: null,
+      vectorSource: null,
+      vectorLayer: null,
+      styleCache: {},
+      sending: false
+    };
 
-  function formatBytes(bytes) {
-    if (bytes === 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
-  }
+    const els = {
+      selectedDatasetValue: document.getElementById("selectedDatasetValue"),
+      selectedAttributeValue: document.getElementById("selectedAttributeValue"),
+      interactionIdValue: document.getElementById("interactionIdValue"),
+      chatLog: document.getElementById("chatLog"),
+      chatInput: document.getElementById("chatInput"),
+      sendBtn: document.getElementById("sendBtn"),
+      clearInputBtn: document.getElementById("clearInputBtn"),
+      resetChatBtn: document.getElementById("resetChatBtn"),
+      fitLayerBtn: document.getElementById("fitLayerBtn"),
+      styleDatasetValue: document.getElementById("styleDatasetValue"),
+      styleAttributeValue: document.getElementById("styleAttributeValue"),
+      styleTypeValue: document.getElementById("styleTypeValue"),
+      legendTitleValue: document.getElementById("legendTitleValue"),
+      swatches: document.getElementById("swatches"),
+      rendererDetailsValue: document.getElementById("rendererDetailsValue"),
+      candidateList: document.getElementById("candidateList"),
+      toast: document.getElementById("toast")
+    };
 
-  function detectType(name) {
-    const n = name.toUpperCase();
-    if (n.includes('COUNTY') || n.includes('PLACE') || n.includes('STATE') || n.includes('TRACT') || n.includes('ZCTA'))
-      return { label: 'Polygon', cls: 'tag-polygon' };
-    if (n.includes('POINT') || n.includes('LANDMARK'))
-      return { label: 'Point', cls: 'tag-point' };
-    if (n.includes('ROAD') || n.includes('RAIL') || n.includes('EDGE') || n.includes('PRISEC'))
-      return { label: 'Line', cls: 'tag-line' };
-    return { label: 'Dataset', cls: 'tag-default' };
-  }
+    const baseLayer = new ol.layer.Tile({
+      source: new ol.source.OSM()
+    });
 
-  async function loadDatasets() {
-    try {
-      const resp = await fetch('/datasets.json');
-      const data = await resp.json();
-      allDatasets = data.datasets || [];
+    state.vectorSource = new ol.source.VectorTile({
+      format: new ol.format.MVT(),
+      url: "/__empty__/{z}/{x}/{y}.mvt"
+    });
 
-      if (allDatasets.length === 0) {
-        contentDiv.innerHTML = '<div class="state-msg"><span class="icon">&#x1F4C2;</span>No datasets found.<br>Run <code>starlet build</code> to create one.</div>';
+    state.vectorLayer = new ol.layer.VectorTile({
+      source: state.vectorSource,
+      style: styleFunction
+    });
+
+    const map = new ol.Map({
+      target: "map",
+      layers: [baseLayer, state.vectorLayer],
+      view: new ol.View({
+        center: ol.proj.fromLonLat([-98.5795, 39.8283]),
+        zoom: 4
+      })
+    });
+
+    function showToast(message, isError = false) {
+      els.toast.textContent = message;
+      els.toast.classList.toggle("error", !!isError);
+      els.toast.classList.add("show");
+      clearTimeout(showToast._timer);
+      showToast._timer = setTimeout(() => {
+        els.toast.classList.remove("show");
+      }, 2600);
+    }
+
+    function escapeHtml(text) {
+      return String(text ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;")
+        .replace(/\n/g, "<br>");
+    }
+
+    function escapeAttr(value) {
+      return String(value ?? "").replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+    }
+
+    function addMessage(role, text) {
+      const div = document.createElement("div");
+      div.className = `msg ${role}`;
+      div.innerHTML = `<span class="meta">${role === "user" ? "You" : "Assistant"}</span>${escapeHtml(text)}`;
+      els.chatLog.appendChild(div);
+      els.chatLog.scrollTop = els.chatLog.scrollHeight;
+    }
+
+    function setSending(sending) {
+      state.sending = sending;
+      els.sendBtn.disabled = sending;
+      els.sendBtn.textContent = sending ? "Sending..." : "Send";
+    }
+
+    function hexToRgba(hex, alpha = 1) {
+      const clean = String(hex || "").replace("#", "");
+      if (!/^[0-9a-fA-F]{6}$/.test(clean)) return `rgba(70,130,180,${alpha})`;
+      const num = parseInt(clean, 16);
+      const r = (num >> 16) & 255;
+      const g = (num >> 8) & 255;
+      const b = num & 255;
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    function interpolateHexColor(hex1, hex2, t) {
+      const c1 = parseInt(hex1.replace("#", ""), 16);
+      const c2 = parseInt(hex2.replace("#", ""), 16);
+      const r1 = (c1 >> 16) & 255, g1 = (c1 >> 8) & 255, b1 = c1 & 255;
+      const r2 = (c2 >> 16) & 255, g2 = (c2 >> 8) & 255, b2 = c2 & 255;
+      const r = Math.round(r1 + (r2 - r1) * t);
+      const g = Math.round(g1 + (g2 - g1) * t);
+      const b = Math.round(b1 + (b2 - b1) * t);
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+
+    function colorForValue(value, min, max, colors) {
+      if (!Array.isArray(colors) || colors.length === 0) return "rgba(70,130,180,1)";
+      if (colors.length === 1) return hexToRgba(colors[0], 1);
+
+      const num = Number(value);
+      if (!Number.isFinite(num)) return hexToRgba(colors[0], 1);
+
+      const safeMin = Number.isFinite(min) ? min : 0;
+      const safeMax = Number.isFinite(max) ? max : 1;
+      const range = safeMax - safeMin || 1;
+      const p = Math.max(0, Math.min(1, (num - safeMin) / range));
+
+      const scaled = p * (colors.length - 1);
+      const i = Math.floor(scaled);
+      const frac = scaled - i;
+
+      if (i >= colors.length - 1) {
+        return hexToRgba(colors[colors.length - 1], 1);
+      }
+      return interpolateHexColor(colors[i], colors[i + 1], frac);
+    }
+
+    function geometryKindOfFeature(feature) {
+      const type = feature.getGeometry()?.getType?.() || "";
+      if (type.includes("Line")) return "line";
+      if (type.includes("Polygon")) return "polygon";
+      if (type.includes("Point")) return "point";
+      return "line";
+    }
+
+    function featureValue(feature, attribute) {
+      if (!attribute) return null;
+      return feature.get(attribute);
+    }
+
+    function defaultStyleFunction(feature) {
+      const geometryKind = geometryKindOfFeature(feature);
+      if (geometryKind === "polygon") {
+        return new ol.style.Style({
+          fill: new ol.style.Fill({ color: "rgba(90, 140, 220, 0.28)" }),
+          stroke: new ol.style.Stroke({ color: "rgba(90, 140, 220, 0.9)", width: 1.3 })
+        });
+      }
+      if (geometryKind === "point") {
+        return new ol.style.Style({
+          image: new ol.style.Circle({
+            radius: 4,
+            fill: new ol.style.Fill({ color: "rgba(111, 140, 255, 0.9)" }),
+            stroke: new ol.style.Stroke({ color: "#ffffff", width: 1 })
+          })
+        });
+      }
+      return new ol.style.Style({
+        stroke: new ol.style.Stroke({ color: "rgba(80, 170, 255, 0.95)", width: 2 })
+      });
+    }
+
+    function createFeatureStyle(feature) {
+      const style = state.currentStyle;
+      if (!style || !style.renderer) {
+        return defaultStyleFunction(feature);
+      }
+
+      const geometryKind = geometryKindOfFeature(feature);
+      const opacity = Number(style.opacity ?? 1);
+      const strokeWidth = Number(style.stroke_width ?? style.strokeWidth ?? 2);
+      const radius = Number(style.radius ?? 4);
+      const renderer = style.renderer;
+      const mode = renderer.mode || "single";
+      const attr = renderer.attribute || style.target_attribute || "";
+
+      let color = "#4682B4";
+      if (mode === "single") {
+        color = renderer.color || "#4682B4";
+      } else if (mode === "gradient") {
+        const value = featureValue(feature, attr);
+        color = colorForValue(value, Number(renderer.min), Number(renderer.max), renderer.colors || []);
+      } else if (mode === "categorical") {
+        const value = String(featureValue(feature, attr) ?? "");
+        const stops = Array.isArray(renderer.stops) ? renderer.stops : [];
+        const found = stops.find(s => String(s.value) === value);
+        color = found?.color || renderer.fallback_color || "#4682B4";
+      }
+
+      const rgba = hexToRgba(color, opacity);
+
+      if (geometryKind === "polygon") {
+        return new ol.style.Style({
+          fill: new ol.style.Fill({ color: rgba }),
+          stroke: new ol.style.Stroke({
+            color: hexToRgba(color, Math.min(1, opacity + 0.05)),
+            width: Math.max(0.5, strokeWidth)
+          })
+        });
+      }
+
+      if (geometryKind === "point") {
+        return new ol.style.Style({
+          image: new ol.style.Circle({
+            radius: Math.max(2, radius),
+            fill: new ol.style.Fill({ color: rgba }),
+            stroke: new ol.style.Stroke({
+              color: hexToRgba(color, 1),
+              width: 1
+            })
+          })
+        });
+      }
+
+      return new ol.style.Style({
+        stroke: new ol.style.Stroke({
+          color: rgba,
+          width: Math.max(0.6, strokeWidth)
+        })
+      });
+    }
+
+    function styleFunction(feature) {
+      return createFeatureStyle(feature);
+    }
+
+    function resetLayerSource() {
+      state.vectorSource = new ol.source.VectorTile({
+        format: new ol.format.MVT(),
+        url: state.currentDataset
+          ? `/${encodeURIComponent(state.currentDataset)}/{z}/{x}/{y}.mvt`
+          : "/__empty__/{z}/{x}/{y}.mvt"
+      });
+      state.vectorLayer.setSource(state.vectorSource);
+      state.vectorLayer.changed();
+    }
+
+    function setDataset(datasetName) {
+      state.currentDataset = datasetName || "";
+      resetLayerSource();
+      renderState();
+      if (state.currentDataset) {
+        showToast(`Loaded dataset: ${state.currentDataset}`);
+      }
+    }
+
+    function fitLayerSoon() {
+      if (!state.currentDataset) {
+        map.getView().animate({
+          center: ol.proj.fromLonLat([-98.5795, 39.8283]),
+          zoom: 4,
+          duration: 400
+        });
         return;
       }
 
-      displayDatasets(allDatasets);
-    } catch (err) {
-      console.error(err);
-      contentDiv.innerHTML = '<div class="state-msg"><span class="icon">&#x26A0;</span>Failed to load datasets.<br>Make sure the server is running.</div>';
+      const source = state.vectorLayer.getSource();
+      let tries = 0;
+      const timer = setInterval(() => {
+        tries += 1;
+        try {
+          const tileGrid = source.getTileGrid && source.getTileGrid();
+          const extent = tileGrid && tileGrid.getExtent ? tileGrid.getExtent() : null;
+          if (extent && extent.every(Number.isFinite)) {
+            map.getView().fit(extent, {
+              padding: [30, 30, 30, 30],
+              maxZoom: 11,
+              duration: 500
+            });
+            clearInterval(timer);
+          }
+        } catch (e) {}
+        if (tries > 6) {
+          clearInterval(timer);
+        }
+      }, 500);
     }
-  }
 
-  function displayDatasets(datasets) {
-    if (datasets.length === 0) {
-      summaryDiv.innerHTML = '';
-      contentDiv.innerHTML = '<div class="state-msg"><span class="icon">&#x1F50D;</span>No datasets match your search.</div>';
-      return;
+    function renderState() {
+      els.selectedDatasetValue.textContent = state.currentDataset || "None";
+      els.selectedAttributeValue.textContent = state.currentAttributes.length ? state.currentAttributes.join(", ") : "None";
+      els.interactionIdValue.textContent = state.interactionId || "None";
+
+      const style = state.currentStyle;
+      els.styleDatasetValue.textContent = state.currentDataset || "None";
+      els.styleAttributeValue.textContent = style?.target_attribute || "None";
+      els.styleTypeValue.textContent = style?.style_type || "None";
+      els.legendTitleValue.textContent = style?.legend_title || "None";
+
+      const colors = style?.color_theme?.colors || [];
+      els.swatches.innerHTML = colors.length
+        ? colors.map(c => `<span class="swatch" style="background:${escapeAttr(c)}"></span>`).join("")
+        : `<span class="empty">No palette yet.</span>`;
+
+      if (style?.renderer) {
+        const r = style.renderer;
+        if (r.mode === "gradient") {
+          els.rendererDetailsValue.textContent = `Gradient on ${r.attribute || "attribute"} from ${r.min} to ${r.max}.`;
+        } else if (r.mode === "categorical") {
+          const count = Array.isArray(r.stops) ? r.stops.length : 0;
+          els.rendererDetailsValue.textContent = `Categorical mapping on ${r.attribute || "attribute"} with ${count} category stop${count === 1 ? "" : "s"}.`;
+        } else if (r.mode === "single") {
+          els.rendererDetailsValue.textContent = `Single color style${r.attribute ? ` using ${r.attribute}` : ""}.`;
+        } else {
+          els.rendererDetailsValue.textContent = "Custom renderer.";
+        }
+      } else {
+        els.rendererDetailsValue.textContent = "No style applied yet.";
+      }
     }
 
-    summaryDiv.innerHTML = '<strong>' + datasets.length + '</strong> dataset' + (datasets.length !== 1 ? 's' : '') + ' available';
+    function renderCandidates(items) {
+      if (!Array.isArray(items) || !items.length) {
+        els.candidateList.innerHTML = `<div class="empty">No retrieval shown for this turn.</div>`;
+        return;
+      }
 
-    const html = '<div class="grid">' +
-      datasets.map(ds => {
-        const type = detectType(ds.id);
+      els.candidateList.innerHTML = items.map(item => {
+        const summary = item.summary || {};
+        const desc = summary.description || summary.dataset || "";
         return `
-          <a href="view_mvt.html?dataset=${encodeURIComponent(ds.id)}" class="card">
-            <div class="card-top">
-              <span class="card-name">${ds.name}</span>
-              <span class="tag ${type.cls}">${type.label}</span>
+          <div class="candidate-item">
+            <div class="candidate-top">
+              <div class="candidate-name">${escapeHtml(item.dataset || "unknown")}</div>
+              <div class="candidate-score">score ${Number(item.score ?? 0).toFixed(4)}</div>
             </div>
-            <div class="card-meta">
-              <span>${formatBytes(ds.size)}</span>
-            </div>
-            <span class="arrow">&rarr;</span>
-          </a>`;
-      }).join('') +
-      '</div>';
+            <div class="candidate-desc">${escapeHtml(desc)}</div>
+          </div>
+        `;
+      }).join("");
+    }
 
-    contentDiv.innerHTML = html;
-  }
+    async function sendChatPrompt(promptText) {
+      const query = String(promptText || "").trim();
+      if (!query || state.sending) return;
 
-  searchInput.addEventListener('input', (e) => {
-    const q = e.target.value.toLowerCase();
-    const filtered = allDatasets.filter(ds => ds.id.toLowerCase().includes(q) || ds.name.toLowerCase().includes(q));
-    displayDatasets(filtered);
-  });
+      addMessage("user", query);
+      setSending(true);
 
-  loadDatasets();
-</script>
+      const payload = {
+        query,
+        interaction_id: state.interactionId || "",
+        current_dataset: state.currentDataset || "",
+        current_attributes: state.currentAttributes || [],
+        current_style: state.currentStyle || {},
+        k: 5
+      };
 
+      try {
+        const resp = await fetch("/api/chat-style", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          throw new Error(data.error || `Request failed with status ${resp.status}`);
+        }
+
+        state.interactionId = data.interaction_id || "";
+        state.currentAttributes = Array.isArray(data.selected_attributes) ? data.selected_attributes : [];
+        state.currentStyle = data.style || null;
+
+        const newDataset = data.selected_dataset || "";
+        if (newDataset && newDataset !== state.currentDataset) {
+          setDataset(newDataset);
+        } else {
+          renderState();
+        }
+
+        renderCandidates(data.top_k || []);
+        state.vectorLayer.changed();
+        addMessage("assistant", data.assistant_response || "Done.");
+
+        if (!state.currentDataset && newDataset) {
+          fitLayerSoon();
+        }
+      } catch (err) {
+        console.error(err);
+        addMessage("assistant", `Error: ${err.message}`);
+        showToast(err.message || "Chat request failed.", true);
+      } finally {
+        setSending(false);
+      }
+    }
+
+    function resetConversation() {
+      state.interactionId = "";
+      state.currentDataset = "";
+      state.currentAttributes = [];
+      state.currentStyle = null;
+      renderCandidates([]);
+      renderState();
+      resetLayerSource();
+      els.chatLog.innerHTML = "";
+      addMessage("assistant", "Start by describing what you want to visualize. Example: color the roads based on speed limit");
+      showToast("Conversation reset.");
+    }
+
+    els.sendBtn.addEventListener("click", () => {
+      const text = els.chatInput.value;
+      if (!text.trim()) return;
+      els.chatInput.value = "";
+      sendChatPrompt(text);
+    });
+
+    els.clearInputBtn.addEventListener("click", () => {
+      els.chatInput.value = "";
+      els.chatInput.focus();
+    });
+
+    els.chatInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        els.sendBtn.click();
+      }
+    });
+
+    els.resetChatBtn.addEventListener("click", resetConversation);
+    els.fitLayerBtn.addEventListener("click", fitLayerSoon);
+
+    document.querySelectorAll(".suggestion-chip").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const prompt = btn.getAttribute("data-prompt") || "";
+        els.chatInput.value = prompt;
+        els.chatInput.focus();
+      });
+    });
+
+    renderState();
+    resetConversation();
+  </script>
 </body>
 </html>

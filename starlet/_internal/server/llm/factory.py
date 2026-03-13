@@ -30,11 +30,10 @@ class LLMFactory:
     """Instantiate an :class:`LLMProvider` by name.
 
     Supported names (case-insensitive):
-        * ``"gemini"`` — Google Gemini (requires ``GEMINI_API_KEY``)
-        * ``"ollama"`` — Local Ollama (uses ``OLLAMA_MODEL``, default ``llama3``)
+        * ``"gemini"`` — Google Gemini Interactions API
+        * ``"ollama"`` — Local Ollama
 
-    Future providers (``"openai"``, ``"claude"``, ...) can be added by
-    registering an entry in ``_PROVIDERS``.
+    Future providers can be added by registering a builder in `_PROVIDERS`.
     """
 
     @staticmethod
@@ -44,7 +43,7 @@ class LLMFactory:
         Raises:
             LLMProviderError: if *name* is unknown or construction fails.
         """
-        key = name.strip().lower()
+        key = (name or "").strip().lower()
         builder = _PROVIDERS.get(key)
         if builder is None:
             supported = ", ".join(sorted(_PROVIDERS))
@@ -57,8 +56,7 @@ class LLMFactory:
     def get_default_provider() -> LLMProvider:
         """Return a provider selected by the ``LLM_PROVIDER`` env var.
 
-        Falls back to ``"gemini"`` when the variable is unset or names an
-        unknown provider.
+        Falls back to ``"gemini"`` when the variable is unset or invalid.
         """
         name = os.environ.get("LLM_PROVIDER", _DEFAULT_PROVIDER).strip().lower()
         if name not in _PROVIDERS:
