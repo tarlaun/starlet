@@ -9,18 +9,39 @@ import logging
 import os
 import re
 
-from flask import Flask, Response, render_template, send_from_directory, request
+from flask import Flask, Response, render_template, request, send_from_directory
 from flask_cors import CORS
 
-from .tiler.tiler import VectorTiler
-from .download_service import DatasetFeatureService
 from .catalog.embedder import GeminiTextEmbedder
 from .catalog.index import CATALOG_FILENAME
-from .catalog.router import CatalogRouter, SearchBackend
 from .catalog.pgvector_store import PgVectorConfig, PgVectorStore
-from .llm import start_style_conversation, continue_style_conversation
+from .catalog.router import CatalogRouter, SearchBackend
+from .download_service import DatasetFeatureService
+from .llm import continue_style_conversation, start_style_conversation
+from .tiler.tiler import VectorTiler
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_unicode_text(value: Any) -> str:
+    text = str(value or "")
+    return (
+        text.replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u00a0", " ")
+    )
+
+
+def _json_response(payload: Any, status: int = 200) -> Tuple[str, int, Dict[str, str]]:
+    return (
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        status,
+        {"Content-Type": "application/json; charset=utf-8"},
+    )
 
 
 def create_app(
@@ -36,6 +57,7 @@ def create_app(
 
     template_dir = str(Path(__file__).parent / "templates")
     app = Flask(__name__, template_folder=template_dir)
+    app.config["JSON_AS_ASCII"] = False
     CORS(app, resources={r"/*": {"origins": "*"}})
 
     data_root = Path(data_dir)
@@ -75,7 +97,7 @@ def create_app(
         if not index_path.exists():
             raise FileNotFoundError(
                 f"Catalogue index not found at {index_path}. "
-                f"Build it first with catalog/index.py."
+                "Build it first with catalog/index.py."
             )
 
         embedder = GeminiTextEmbedder()
@@ -97,7 +119,7 @@ def create_app(
         if not index_path.exists():
             raise FileNotFoundError(
                 f"Catalogue index not found at {index_path}. "
-                f"Build it first with catalog/index.py."
+                "Build it first with catalog/index.py."
             )
 
         mtime = index_path.stat().st_mtime
@@ -115,7 +137,7 @@ def create_app(
         if not stats_path.exists():
             raise FileNotFoundError(f"Stats not found for dataset: {dataset}")
 
-        with open(stats_path, "r") as f:
+        with open(stats_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
     def _dataset_exists(dataset: str) -> bool:
@@ -139,7 +161,7 @@ def create_app(
         if not data_root.exists():
             return datasets
 
-        query_lc = (query or "").strip().lower()
+        query_lc = _normalize_unicode_text(query).strip().lower()
 
         for d in sorted(data_root.iterdir()):
             if not d.is_dir():
@@ -161,7 +183,7 @@ def create_app(
         return datasets
 
     def _extract_first_json_array(text: str) -> List[Any]:
-        cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
+        cleaned = re.sub(r"```(?:json)?\s*", "", _normalize_unicode_text(text)).strip().rstrip("`")
         match = re.search(r"\[.*\]", cleaned, re.DOTALL)
         if not match:
             raise ValueError("No JSON array found in LLM response")
@@ -171,12 +193,12 @@ def create_app(
         return parsed
 
     def _extract_first_json_object(text: str) -> Dict[str, Any]:
-        cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
+        cleaned = re.sub(r"```(?:json)?\s*", "", _normalize_unicode_text(text)).strip().rstrip("`")
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start < 0 or end < 0 or end < start:
             raise ValueError("No JSON object found in LLM response")
-        parsed = json.loads(cleaned[start:end + 1])
+        parsed = json.loads(cleaned[start : end + 1])
         if not isinstance(parsed, dict):
             raise ValueError("Expected JSON object from LLM response")
         return parsed
@@ -204,7 +226,7 @@ def create_app(
         dataset_name = str(summary.get("dataset", "")).lower()
         if "road" in dataset_name or "rail" in dataset_name:
             return "line"
-        if "county" in dataset_name or "state" in dataset_name or "tract" in dataset_name:
+        if any(x in dataset_name for x in ("county", "state", "tract")):
             return "polygon"
         if "point" in dataset_name:
             return "point"
@@ -255,6 +277,12 @@ def create_app(
             "colors": sane,
         }
 
+    def _safe_float(value: Any, fallback: float) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return fallback
+
     def _normalize_style_for_client(
         dataset: str,
         dataset_summary: Dict[str, Any],
@@ -262,26 +290,29 @@ def create_app(
     ) -> Dict[str, Any]:
         geometry_kind = _infer_geometry_kind_from_summary(dataset_summary)
         style_type = str(style.get("style_type", "")).strip() or (
-            "line-single-color" if geometry_kind == "line"
-            else "fill-single-color" if geometry_kind == "polygon"
-            else "circle-single-color" if geometry_kind == "point"
+            "line-single-color"
+            if geometry_kind == "line"
+            else "fill-single-color"
+            if geometry_kind == "polygon"
+            else "circle-single-color"
+            if geometry_kind == "point"
             else "line-single-color"
         )
 
-        target_attribute = str(style.get("target_attribute", "")).strip()
+        target_attribute = _normalize_unicode_text(style.get("target_attribute", "")).strip()
         attr_summary = _find_attribute_summary(dataset_summary, target_attribute) if target_attribute else None
         attr_role = _attribute_role_from_summary(attr_summary or {})
         is_categorical = "categorical" in style_type or attr_role in {"categorical", "categorical_text"}
         is_gradient = "gradient" in style_type
 
         color_theme = style.get("color_theme") or {}
-        theme_name = str(color_theme.get("name", "")).strip() or "custom"
+        theme_name = _normalize_unicode_text(color_theme.get("name", "")).strip() or "custom"
         theme_colors = color_theme.get("colors") or []
 
-        opacity = float(style.get("opacity", 1.0) or 1.0)
-        stroke_width = float(style.get("stroke_width", 2.0) or 2.0)
-        radius = float(style.get("radius", 4.0) or 4.0)
-        legend_title = str(style.get("legend_title", "")).strip() or target_attribute or dataset
+        opacity = _safe_float(style.get("opacity", 1.0), 1.0)
+        stroke_width = _safe_float(style.get("stroke_width", 2.0), 2.0)
+        radius = _safe_float(style.get("radius", 4.0), 4.0)
+        legend_title = _normalize_unicode_text(style.get("legend_title", "")).strip() or target_attribute or dataset
         notes = style.get("notes") or []
         if not isinstance(notes, list):
             notes = [str(notes)]
@@ -295,13 +326,10 @@ def create_app(
             categorical_values: List[str] = []
             if attr_summary:
                 for item in attr_summary.get("top_k") or []:
-                    if isinstance(item, dict):
-                        value = item.get("value")
-                    else:
-                        value = item
+                    value = item.get("value") if isinstance(item, dict) else item
                     if value is None:
                         continue
-                    categorical_values.append(str(value))
+                    categorical_values.append(_normalize_unicode_text(value))
 
             stops = [
                 {"value": value, "color": palette[i % len(palette)]}
@@ -327,25 +355,16 @@ def create_app(
                     "fallback_color": palette[0],
                     "stops": stops,
                 },
-                "notes": [str(n) for n in notes],
+                "notes": [_normalize_unicode_text(n) for n in notes],
             }
 
         if is_gradient:
             palette = _gradient_palette(theme_name or "gradient", list(theme_colors))
-            min_value = None
-            max_value = None
-            if attr_summary:
-                min_value = attr_summary.get("min")
-                max_value = attr_summary.get("max")
+            min_value = attr_summary.get("min") if attr_summary else None
+            max_value = attr_summary.get("max") if attr_summary else None
 
-            try:
-                min_value = float(min_value) if min_value is not None else 0.0
-            except Exception:
-                min_value = 0.0
-            try:
-                max_value = float(max_value) if max_value is not None else 1.0
-            except Exception:
-                max_value = 1.0
+            min_value = _safe_float(min_value, 0.0)
+            max_value = _safe_float(max_value, 1.0)
             if max_value == min_value:
                 max_value = min_value + 1.0
 
@@ -366,7 +385,7 @@ def create_app(
                     "max": max_value,
                     "colors": palette["colors"],
                 },
-                "notes": [str(n) for n in notes],
+                "notes": [_normalize_unicode_text(n) for n in notes],
             }
 
         fallback_color = "#4682B4"
@@ -391,17 +410,19 @@ def create_app(
                 "attribute": target_attribute,
                 "color": fallback_color,
             },
-            "notes": [str(n) for n in notes],
+            "notes": [_normalize_unicode_text(n) for n in notes],
         }
 
     def _candidate_payload_for_llm(candidates) -> List[Dict[str, Any]]:
         payload = []
         for c in candidates:
-            payload.append({
-                "dataset": c.dataset,
-                "score": round(float(c.score), 6),
-                "summary": c.summary,
-            })
+            payload.append(
+                {
+                    "dataset": c.dataset,
+                    "score": round(float(c.score), 6),
+                    "summary": c.summary,
+                }
+            )
         return payload
 
     def _looks_like_new_dataset_request(
@@ -409,12 +430,13 @@ def create_app(
         current_dataset: Optional[str],
         current_style: Optional[Dict[str, Any]],
     ) -> bool:
-        q = (user_query or "").strip().lower()
+        q = _normalize_unicode_text(user_query).strip().lower()
         if not q:
             return False
 
         if any(
-            phrase in q for phrase in [
+            phrase in q
+            for phrase in [
                 "use a different dataset",
                 "switch dataset",
                 "another dataset",
@@ -428,9 +450,22 @@ def create_app(
             return False
 
         domain_triggers = [
-            "county", "counties", "state", "states", "tract", "tracts",
-            "road", "roads", "rail", "rails", "building", "buildings",
-            "point", "points", "landmark", "landmarks",
+            "county",
+            "counties",
+            "state",
+            "states",
+            "tract",
+            "tracts",
+            "road",
+            "roads",
+            "rail",
+            "rails",
+            "building",
+            "buildings",
+            "point",
+            "points",
+            "landmark",
+            "landmarks",
         ]
         if any(word in q for word in domain_triggers):
             target_attr = ""
@@ -443,8 +478,9 @@ def create_app(
         return False
 
     def _run_initial_chat_turn(user_query: str, k: int = 5) -> Tuple[Dict[str, Any], int]:
+        normalized_query = _normalize_unicode_text(user_query)
         router = _get_catalog_router()
-        candidates = router.search(user_query, k=k)
+        candidates = router.search(normalized_query, k=k)
         if not candidates:
             raise LookupError("No indexed datasets available")
 
@@ -457,7 +493,7 @@ def create_app(
                 "candidates": candidate_payload,
             },
             user_query=(
-                f"{user_query}\n\n"
+                f"{normalized_query}\n\n"
                 "Choose the single best dataset from the provided candidates, "
                 "choose the best attribute for styling, and generate the initial style."
             ),
@@ -467,7 +503,7 @@ def create_app(
             temperature=0.2,
         )
 
-        selected_dataset = str(turn1.selected_dataset).strip()
+        selected_dataset = _normalize_unicode_text(turn1.selected_dataset).strip()
         candidate_by_name = {c.dataset: c for c in candidates}
         if selected_dataset not in candidate_by_name:
             logger.warning(
@@ -487,13 +523,13 @@ def create_app(
 
         response = {
             "mode": "initial",
-            "query": user_query,
-            "interaction_id": turn1.interaction_id,
-            "assistant_response": turn1.assistant_response,
+            "query": normalized_query,
+            "interaction_id": _normalize_unicode_text(turn1.interaction_id),
+            "assistant_response": _normalize_unicode_text(turn1.assistant_response),
             "selected_dataset": selected_dataset,
             "selected_dataset_score": float(selected_candidate.score),
-            "selected_attributes": turn1.selected_attributes,
-            "style_intent": turn1.style_intent,
+            "selected_attributes": [_normalize_unicode_text(x) for x in (turn1.selected_attributes or [])],
+            "style_intent": _normalize_unicode_text(turn1.style_intent),
             "style": normalized_style,
             "top_k": candidate_payload,
         }
@@ -512,6 +548,7 @@ def create_app(
         if not interaction_id:
             raise ValueError("interaction_id is required for follow-up turns")
 
+        normalized_query = _normalize_unicode_text(user_query)
         stats = _load_stats_for_dataset(current_dataset)
 
         selected_summary = {
@@ -523,8 +560,9 @@ def create_app(
         for attr in stats.get("attributes") or []:
             if not isinstance(attr, dict):
                 continue
+
             stats_obj = attr.get("stats") or {}
-            name = attr.get("name")
+            name = _normalize_unicode_text(attr.get("name"))
             entry: Dict[str, Any] = {"name": name}
 
             if "geom_types" in stats_obj:
@@ -542,26 +580,27 @@ def create_app(
                 entry["top_k"] = stats_obj.get("top_k") or []
             else:
                 entry["role"] = "unknown"
+
             selected_summary["attributes"].append(entry)
 
         turn = continue_style_conversation(
             dataset=current_dataset,
-            user_query=user_query,
-            previous_interaction_id=interaction_id,
-            selected_attributes_hint=current_attributes or [],
+            user_query=normalized_query,
+            previous_interaction_id=_normalize_unicode_text(interaction_id),
+            selected_attributes_hint=[_normalize_unicode_text(x) for x in (current_attributes or [])],
             current_style_hint=current_style or {},
             provider_name="gemini",
             temperature=0.2,
         )
 
-        returned_dataset = str(turn.selected_dataset).strip() or current_dataset
+        returned_dataset = _normalize_unicode_text(turn.selected_dataset).strip() or current_dataset
         if returned_dataset != current_dataset:
             logger.info(
                 "[ChatStyle] Follow-up requested dataset switch from '%s' to '%s'; restarting retrieval.",
                 current_dataset,
                 returned_dataset,
             )
-            return _run_initial_chat_turn(user_query=user_query, k=5)
+            return _run_initial_chat_turn(user_query=normalized_query, k=5)
 
         normalized_style = _normalize_style_for_client(
             dataset=current_dataset,
@@ -571,12 +610,12 @@ def create_app(
 
         response = {
             "mode": "followup",
-            "query": user_query,
-            "interaction_id": turn.interaction_id,
-            "assistant_response": turn.assistant_response,
+            "query": normalized_query,
+            "interaction_id": _normalize_unicode_text(turn.interaction_id),
+            "assistant_response": _normalize_unicode_text(turn.assistant_response),
             "selected_dataset": current_dataset,
-            "selected_attributes": turn.selected_attributes,
-            "style_intent": turn.style_intent,
+            "selected_attributes": [_normalize_unicode_text(x) for x in (turn.selected_attributes or [])],
+            "style_intent": _normalize_unicode_text(turn.style_intent),
             "style": normalized_style,
             "top_k": [],
         }
@@ -594,15 +633,22 @@ def create_app(
         elapsed_ms = (perf_counter() - t0) * 1000
         logger.info(
             "[TileRequest] dataset=%s z=%d x=%d y=%d bytes=%d elapsed=%.1fms",
-            dataset, z, x, y, len(data), elapsed_ms,
+            dataset,
+            z,
+            x,
+            y,
+            len(data),
+            elapsed_ms,
         )
         return Response(data, mimetype="application/vnd.mapbox-vector-tile")
 
     @app.get("/api/datasets")
     def list_datasets():
-        datasets = sorted([d.name for d in data_root.iterdir()]) if data_root.exists() else []
+        datasets = sorted(
+            [d.name for d in data_root.iterdir() if d.is_dir()]  # type: ignore[misc]
+        ) if data_root.exists() else []
         return app.response_class(
-            response=json.dumps({"datasets": datasets}),
+            response=json.dumps({"datasets": datasets}, ensure_ascii=False),
             mimetype="application/json",
         )
 
@@ -611,7 +657,7 @@ def create_app(
         query = request.args.get("q", default=None)
         datasets = _list_dataset_metadata(query=query)
         return app.response_class(
-            response=json.dumps({"datasets": datasets}, indent=2),
+            response=json.dumps({"datasets": datasets}, indent=2, ensure_ascii=False),
             mimetype="application/json",
         )
 
@@ -620,13 +666,13 @@ def create_app(
         try:
             metadata = _dataset_metadata(dataset)
             return app.response_class(
-                response=json.dumps(metadata, indent=2),
+                response=json.dumps(metadata, indent=2, ensure_ascii=False),
                 mimetype="application/json",
             )
         except FileNotFoundError:
             return {"error": "Dataset not found"}, 404
         except Exception as e:
-            return {"error": f"Failed to retrieve metadata: {str(e)}"}, 500
+            return {"error": f"Failed to retrieve metadata: {e}"}, 500
 
     @app.get("/api/datasets/<dataset>/stats")
     def get_dataset_stats(dataset):
@@ -634,10 +680,10 @@ def create_app(
         if not stats_path.exists():
             return {"error": "Stats not found for dataset"}, 404
         try:
-            with open(stats_path, "r") as f:
+            with open(stats_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            return {"error": f"Failed to load stats: {str(e)}"}, 500
+            return {"error": f"Failed to load stats: {e}"}, 500
 
     @app.get("/datasets/<dataset>.html")
     def visualize_dataset(dataset):
@@ -651,7 +697,7 @@ def create_app(
                 dataset_name=dataset.replace("_", " ").title(),
             )
         except Exception as e:
-            return f"<h1>Failed to render visualization: {str(e)}</h1>", 500
+            return f"<h1>Failed to render visualization: {e}</h1>", 500
 
     @app.get("/datasets/<dataset>/features.<format>")
     def download_features(dataset, format):
@@ -673,7 +719,7 @@ def create_app(
         except FileNotFoundError as e:
             return {"error": str(e)}, 404
         except Exception as e:
-            return {"error": f"Internal error: {str(e)}"}, 500
+            return {"error": f"Internal error: {e}"}, 500
 
     @app.post("/datasets/<dataset>/features.<format>")
     def download_features_with_geometry(dataset, format):
@@ -681,7 +727,7 @@ def create_app(
         if not dataset_path.exists() or not dataset_path.is_dir():
             return {"error": "Dataset not found"}, 404
         try:
-            geojson_payload = request.get_json()
+            geojson_payload = request.get_json(silent=True)
             mbr_string = request.args.get("mbr", default=None)
             if geojson_payload:
                 geometry = geojson_payload.get("geometry")
@@ -706,7 +752,7 @@ def create_app(
         except FileNotFoundError as e:
             return {"error": str(e)}, 404
         except Exception as e:
-            return {"error": f"Internal error: {str(e)}"}, 500
+            return {"error": f"Internal error: {e}"}, 500
 
     @app.get("/datasets/<dataset>/features/sample.json")
     def get_sample_non_geometry_attributes(dataset):
@@ -721,7 +767,7 @@ def create_app(
             if not sample_record:
                 return {"error": "No matching record found"}, 404
             return app.response_class(
-                response=json.dumps(sample_record, indent=2),
+                response=json.dumps(sample_record, indent=2, ensure_ascii=False),
                 mimetype="application/json",
             )
         except ValueError as e:
@@ -729,7 +775,7 @@ def create_app(
         except FileNotFoundError as e:
             return {"error": str(e)}, 404
         except Exception as e:
-            return {"error": f"Internal error: {str(e)}"}, 500
+            return {"error": f"Internal error: {e}"}, 500
 
     @app.get("/datasets/<dataset>/features/sample.geojson")
     def get_sample_with_geometry(dataset):
@@ -744,7 +790,7 @@ def create_app(
             if not sample_record:
                 return {"error": "No matching record found"}, 404
             return app.response_class(
-                response=json.dumps(sample_record, indent=2),
+                response=json.dumps(sample_record, indent=2, ensure_ascii=False),
                 mimetype="application/json",
             )
         except ValueError as e:
@@ -752,7 +798,7 @@ def create_app(
         except FileNotFoundError as e:
             return {"error": str(e)}, 404
         except Exception as e:
-            return {"error": f"Internal error: {str(e)}"}, 500
+            return {"error": f"Internal error: {e}"}, 500
 
     # -------------------------------------------------------------------------
     # Routes: UI
@@ -777,19 +823,22 @@ def create_app(
 
     @app.post("/api/chat-style")
     def chat_style():
-        json_ct = {"Content-Type": "application/json"}
         body = request.get_json(silent=True) or {}
 
-        user_query = str(body.get("query", "")).strip()
+        user_query = _normalize_unicode_text(body.get("query", "")).strip()
         if not user_query:
-            return json.dumps({"error": "Request body must include a non-empty 'query'"}), 400, json_ct
+            return _json_response({"error": "Request body must include a non-empty 'query'"}, 400)
 
-        interaction_id = str(body.get("interaction_id", "") or "").strip()
-        current_dataset = str(body.get("current_dataset", "") or "").strip()
+        interaction_id = _normalize_unicode_text(body.get("interaction_id", "")).strip()
+        current_dataset = _normalize_unicode_text(body.get("current_dataset", "")).strip()
 
         current_attributes_raw = body.get("current_attributes")
         if isinstance(current_attributes_raw, list):
-            current_attributes = [str(x) for x in current_attributes_raw if isinstance(x, (str, int, float))]
+            current_attributes = [
+                _normalize_unicode_text(x)
+                for x in current_attributes_raw
+                if isinstance(x, (str, int, float))
+            ]
         else:
             current_attributes = []
 
@@ -804,25 +853,20 @@ def create_app(
             k = 5
 
         try:
-            # Home page starts with no dataset selected.
-            # First turn: retrieve candidates and let the LLM choose the best dataset,
-            # attribute, and style.
             if not interaction_id or not current_dataset:
                 response, status = _run_initial_chat_turn(user_query=user_query, k=k)
-                return json.dumps(response, indent=2), status, json_ct
+                return _json_response(response, status)
 
-            # Follow-up turns continue the current interaction on the current dataset,
-            # unless the prompt clearly requests a different dataset/domain.
             if _looks_like_new_dataset_request(
                 user_query=user_query,
                 current_dataset=current_dataset,
                 current_style=current_style,
             ):
                 response, status = _run_initial_chat_turn(user_query=user_query, k=k)
-                return json.dumps(response, indent=2), status, json_ct
+                return _json_response(response, status)
 
             if not _dataset_exists(current_dataset):
-                return json.dumps({"error": f"Current dataset not found: {current_dataset}"}), 404, json_ct
+                return _json_response({"error": f"Current dataset not found: {current_dataset}"}, 404)
 
             response, status = _run_followup_chat_turn(
                 user_query=user_query,
@@ -831,15 +875,15 @@ def create_app(
                 current_attributes=current_attributes,
                 current_style=current_style,
             )
-            return json.dumps(response, indent=2), status, json_ct
+            return _json_response(response, status)
 
         except FileNotFoundError as e:
-            return json.dumps({"error": str(e)}), 503, json_ct
+            return _json_response({"error": str(e)}, 503)
         except LookupError as e:
-            return json.dumps({"error": str(e)}), 404, json_ct
+            return _json_response({"error": str(e)}, 404)
         except Exception as e:
-            logger.exception("[ChatStyle] Failed")
-            return json.dumps({"error": f"Chat styling failed: {e}"}), 500, json_ct
+            logger.exception("[ChatStyle] Failed for query=%r", user_query)
+            return _json_response({"error": f"Chat styling failed: {e}"}, 500)
 
     # -------------------------------------------------------------------------
     # Compatibility route: keep old endpoint name but route into chat API.
