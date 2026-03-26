@@ -17,7 +17,7 @@ from .catalog.index import CATALOG_FILENAME
 from .catalog.pgvector_store import PgVectorConfig, PgVectorStore
 from .catalog.router import CatalogRouter, SearchBackend
 from .download_service import DatasetFeatureService
-from .llm import continue_style_conversation, start_style_conversation
+from .llm import continue_style_conversation, generate_map_code, start_style_conversation
 from .tiler.tiler import VectorTiler
 
 logger = logging.getLogger(__name__)
@@ -55,12 +55,17 @@ def create_app(
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    template_dir = str(Path(__file__).parent / "templates")
+    server_dir = Path(__file__).parent.resolve()
+    template_dir = str(server_dir / "templates")
+
     app = Flask(__name__, template_folder=template_dir)
     app.config["JSON_AS_ASCII"] = False
     CORS(app, resources={r"/*": {"origins": "*"}})
 
-    data_root = Path(data_dir)
+    data_root = Path(data_dir).resolve()
+    logger.info("Resolved data root: %s", data_root)
+    print("DATA DIR =", data_root)
+
     tiler_cache: Dict[str, VectorTiler] = {}
     feature_service = DatasetFeatureService(data_root)
 
@@ -68,10 +73,6 @@ def create_app(
         "router": None,
         "mtime": None,
     }
-
-    # -------------------------------------------------------------------------
-    # Core helpers
-    # -------------------------------------------------------------------------
 
     def get_tiler(dataset: str) -> VectorTiler:
         if dataset not in tiler_cache:
@@ -198,14 +199,10 @@ def create_app(
         end = cleaned.rfind("}")
         if start < 0 or end < 0 or end < start:
             raise ValueError("No JSON object found in LLM response")
-        parsed = json.loads(cleaned[start : end + 1])
+        parsed = json.loads(cleaned[start:end + 1])
         if not isinstance(parsed, dict):
             raise ValueError("Expected JSON object from LLM response")
         return parsed
-
-    # -------------------------------------------------------------------------
-    # Styling helpers
-    # -------------------------------------------------------------------------
 
     def _infer_geometry_kind_from_summary(summary: Dict[str, Any]) -> str:
         geometry = summary.get("geometry") or []
@@ -236,7 +233,6 @@ def create_app(
         role = str(attr.get("role", "")).strip().lower()
         if role:
             return role
-
         if attr.get("min") is not None or attr.get("max") is not None:
             return "numeric"
         if attr.get("top_k"):
@@ -282,6 +278,43 @@ def create_app(
             return float(value)
         except Exception:
             return fallback
+
+    def _dataset_summary_for_llm(dataset: str) -> Dict[str, Any]:
+        stats = _load_stats_for_dataset(dataset)
+
+        selected_summary: Dict[str, Any] = {
+            "dataset": dataset,
+            "geometry": [],
+            "attributes": [],
+        }
+
+        for attr in stats.get("attributes") or []:
+            if not isinstance(attr, dict):
+                continue
+
+            stats_obj = attr.get("stats") or {}
+            name = _normalize_unicode_text(attr.get("name"))
+            entry: Dict[str, Any] = {"name": name}
+
+            if "geom_types" in stats_obj:
+                entry["geom_types"] = stats_obj.get("geom_types") or {}
+                selected_summary["geometry"].append(entry)
+                continue
+
+            if any(k in stats_obj for k in ("min", "max", "mean", "stddev")):
+                entry["role"] = "numeric"
+                entry["min"] = stats_obj.get("min")
+                entry["max"] = stats_obj.get("max")
+                entry["top_k"] = stats_obj.get("top_k") or []
+            elif stats_obj.get("top_k") is not None:
+                entry["role"] = "categorical"
+                entry["top_k"] = stats_obj.get("top_k") or []
+            else:
+                entry["role"] = "unknown"
+
+            selected_summary["attributes"].append(entry)
+
+        return selected_summary
 
     def _normalize_style_for_client(
         dataset: str,
@@ -549,39 +582,7 @@ def create_app(
             raise ValueError("interaction_id is required for follow-up turns")
 
         normalized_query = _normalize_unicode_text(user_query)
-        stats = _load_stats_for_dataset(current_dataset)
-
-        selected_summary = {
-            "dataset": current_dataset,
-            "geometry": [],
-            "attributes": [],
-        }
-
-        for attr in stats.get("attributes") or []:
-            if not isinstance(attr, dict):
-                continue
-
-            stats_obj = attr.get("stats") or {}
-            name = _normalize_unicode_text(attr.get("name"))
-            entry: Dict[str, Any] = {"name": name}
-
-            if "geom_types" in stats_obj:
-                entry["geom_types"] = stats_obj.get("geom_types") or {}
-                selected_summary["geometry"].append(entry)
-                continue
-
-            if any(k in stats_obj for k in ("min", "max", "mean", "stddev")):
-                entry["role"] = "numeric"
-                entry["min"] = stats_obj.get("min")
-                entry["max"] = stats_obj.get("max")
-                entry["top_k"] = stats_obj.get("top_k") or []
-            elif stats_obj.get("top_k") is not None:
-                entry["role"] = "categorical"
-                entry["top_k"] = stats_obj.get("top_k") or []
-            else:
-                entry["role"] = "unknown"
-
-            selected_summary["attributes"].append(entry)
+        selected_summary = _dataset_summary_for_llm(current_dataset)
 
         turn = continue_style_conversation(
             dataset=current_dataset,
@@ -642,10 +643,32 @@ def create_app(
         )
         return Response(data, mimetype="application/vnd.mapbox-vector-tile")
 
+    @app.get("/datasets/<path:filepath>")
+    def serve_dataset_file(filepath):
+        full_path = (data_root / filepath).resolve()
+
+        try:
+            full_path.relative_to(data_root)
+        except ValueError:
+            logger.warning("[DatasetFile] Blocked path traversal: %s", full_path)
+            return "File not found", 404
+
+        logger.info(
+            "[DatasetFile] request=%s resolved=%s exists=%s",
+            filepath,
+            full_path,
+            full_path.exists(),
+        )
+
+        if not full_path.exists() or not full_path.is_file():
+            return "File not found", 404
+
+        return send_from_directory(str(data_root), filepath)
+
     @app.get("/api/datasets")
     def list_datasets():
         datasets = sorted(
-            [d.name for d in data_root.iterdir() if d.is_dir()]  # type: ignore[misc]
+            [d.name for d in data_root.iterdir() if d.is_dir()]
         ) if data_root.exists() else []
         return app.response_class(
             response=json.dumps({"datasets": datasets}, ensure_ascii=False),
@@ -809,12 +832,29 @@ def create_app(
         logger.info("Serving index page")
         return render_template("index.html")
 
+    @app.get("/map.html")
+    def map_page():
+        logger.info("Serving map runtime page")
+        return render_template("map.html")
+
     @app.route("/<path:filename>")
     def serve_file(filename):
-        server_dir = Path(__file__).parent
-        file_path = server_dir / filename
+        normalized = filename.strip("/")
+
+        # Prevent this catch-all from touching dataset-file and API paths.
+        if normalized.startswith("datasets/") or normalized.startswith("api/"):
+            return "File not found", 404
+
+        file_path = (server_dir / normalized).resolve()
+
+        try:
+            file_path.relative_to(server_dir)
+        except ValueError:
+            return "File not found", 404
+
         if file_path.exists() and file_path.is_file():
-            return send_from_directory(str(server_dir), filename)
+            return send_from_directory(str(server_dir), normalized)
+
         return "File not found", 404
 
     # -------------------------------------------------------------------------
@@ -885,10 +925,6 @@ def create_app(
             logger.exception("[ChatStyle] Failed for query=%r", user_query)
             return _json_response({"error": f"Chat styling failed: {e}"}, 500)
 
-    # -------------------------------------------------------------------------
-    # Compatibility route: keep old endpoint name but route into chat API.
-    # -------------------------------------------------------------------------
-
     @app.post("/api/query-styles")
     def query_styles():
         body = request.get_json(silent=True) or {}
@@ -898,5 +934,93 @@ def create_app(
             json=body,
         ):
             return chat_style()
+
+    @app.post("/api/generate-map-code")
+    def generate_map_code_route():
+        body = request.get_json(silent=True) or {}
+
+        user_query = _normalize_unicode_text(body.get("query", "")).strip()
+        if not user_query:
+            return _json_response({"error": "Request body must include a non-empty 'query'"}, 400)
+
+        interaction_id = _normalize_unicode_text(body.get("interaction_id", "")).strip()
+        current_dataset = _normalize_unicode_text(body.get("current_dataset", "")).strip()
+
+        current_attributes_raw = body.get("current_attributes")
+        if isinstance(current_attributes_raw, list):
+            current_attributes = [
+                _normalize_unicode_text(x)
+                for x in current_attributes_raw
+                if isinstance(x, (str, int, float))
+            ]
+        else:
+            current_attributes = []
+
+        current_style = body.get("current_style")
+        if not isinstance(current_style, dict):
+            current_style = {}
+
+        requested_k = body.get("k", 5)
+        try:
+            k = max(1, min(int(requested_k), 10))
+        except Exception:
+            k = 5
+
+        try:
+            top_k_payload = []
+
+            if not current_dataset:
+                initial_response, _ = _run_initial_chat_turn(user_query=user_query, k=k)
+                current_dataset = _normalize_unicode_text(initial_response.get("selected_dataset", "")).strip()
+                interaction_id = _normalize_unicode_text(initial_response.get("interaction_id", "")).strip()
+                current_style = initial_response.get("style") or {}
+                current_attributes = initial_response.get("selected_attributes") or []
+                top_k_payload = initial_response.get("top_k") or []
+
+            if not current_dataset:
+                return _json_response({"error": "Could not determine a dataset for map-code generation."}, 500)
+
+            if not _dataset_exists(current_dataset):
+                return _json_response({"error": f"Dataset not found: {current_dataset}"}, 404)
+
+            dataset_summary = _dataset_summary_for_llm(current_dataset)
+
+            if not current_style:
+                current_style = _normalize_style_for_client(
+                    dataset=current_dataset,
+                    dataset_summary=dataset_summary,
+                    style={},
+                )
+
+            code_turn = generate_map_code(
+                dataset=current_dataset,
+                dataset_summary=dataset_summary,
+                user_query=user_query,
+                current_style=current_style,
+                previous_interaction_id=interaction_id or None,
+                provider_name="gemini",
+                temperature=0.2,
+            )
+
+            response = {
+                "mode": "generated_code",
+                "query": user_query,
+                "interaction_id": _normalize_unicode_text(code_turn.interaction_id or interaction_id),
+                "assistant_response": _normalize_unicode_text(code_turn.assistant_response),
+                "selected_dataset": current_dataset,
+                "selected_attributes": [_normalize_unicode_text(x) for x in (current_attributes or [])],
+                "style": current_style,
+                "generated_code": _normalize_unicode_text(code_turn.code),
+                "top_k": top_k_payload,
+            }
+            return _json_response(response, 200)
+
+        except FileNotFoundError as e:
+            return _json_response({"error": str(e)}, 503)
+        except LookupError as e:
+            return _json_response({"error": str(e)}, 404)
+        except Exception as e:
+            logger.exception("[GenerateMapCode] Failed for query=%r", user_query)
+            return _json_response({"error": f"Map code generation failed: {e}"}, 500)
 
     return app
