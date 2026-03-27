@@ -136,18 +136,51 @@ It also provides:
 - state      (current runtime state snapshot)
 
 Rules:
-- Return ONLY a single JSON object with these keys:
-  - assistant_response: string
-  - code: string
-- The code must be plain JavaScript with no markdown fences.
+- Return raw JavaScript only.
+- Do NOT return JSON.
+- Do NOT return Markdown fences.
+- Do NOT explain the code before or after it.
 - The code should usually call api.setDataset(...) first if a dataset is known.
-- The code should be robust and readable.
 - Prefer using the provided structured style via api.applyStyle(...) unless the user explicitly asks for something custom.
 - You may directly manipulate the map after ensuring the dataset layer exists.
 - Do not invent unavailable server endpoints.
 - Do not generate HTML.
 - Do not wrap the code in an IIFE unless needed.
 """
+
+def _strip_code_fences(text: str) -> str:
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(r"^```(?:javascript|js|json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _extract_code_response(text: str) -> GeneratedMapCodeResult:
+    cleaned = _strip_code_fences(text)
+
+    if not cleaned:
+        raise ValueError("LLM returned an empty response.")
+
+    # Backward-compatible path: if the model still returns JSON, try to parse it.
+    try:
+        parsed = _extract_json_object(cleaned)
+        code = _clean_text(parsed.get("code"))
+        assistant_response = _clean_text(parsed.get("assistant_response")) or "Generated map code."
+        if code:
+            return GeneratedMapCodeResult(
+                code=code,
+                assistant_response=assistant_response,
+                interaction_id=None,
+            )
+    except Exception:
+        pass
+
+    # New preferred path: treat the whole response as raw JavaScript.
+    return GeneratedMapCodeResult(
+        code=cleaned,
+        assistant_response="Generated map code.",
+        interaction_id=None,
+    )
 
 
 def _clean_text(value: Any) -> str:
@@ -321,13 +354,10 @@ def generate_map_code(
     )
     logger.debug("generate_map_code raw text: %s", raw.text)
 
-    parsed = _extract_json_object(raw.text)
-    code = _clean_text(parsed.get("code"))
-    if not code:
+    result = _extract_code_response(raw.text)
+    result.interaction_id = raw.interaction_id or previous_interaction_id
+
+    if not _clean_text(result.code):
         raise ValueError("LLM did not return any code.")
 
-    return GeneratedMapCodeResult(
-        code=code,
-        assistant_response=_clean_text(parsed.get("assistant_response")) or "Generated map code.",
-        interaction_id=raw.interaction_id or previous_interaction_id,
-    )
+    return result

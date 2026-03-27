@@ -4,21 +4,33 @@ from __future__ import annotations
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from threading import Lock, Thread
+from uuid import uuid4
 import json
 import logging
 import os
 import re
 
 from flask import Flask, Response, render_template, request, send_from_directory
+from werkzeug.utils import secure_filename
 from flask_cors import CORS
 
 from .catalog.embedder import GeminiTextEmbedder
-from .catalog.index import CATALOG_FILENAME
+from .catalog.index import CATALOG_FILENAME, build_catalog_index
 from .catalog.pgvector_store import PgVectorConfig, PgVectorStore
 from .catalog.router import CatalogRouter, SearchBackend
 from .download_service import DatasetFeatureService
 from .llm import continue_style_conversation, generate_map_code, start_style_conversation
 from .tiler.tiler import VectorTiler
+
+try:
+    from ... import build as starlet_build
+except Exception:  # pragma: no cover
+    import starlet as starlet_api
+
+    def starlet_build(*args, **kwargs):
+        return starlet_api.build(*args, **kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +85,132 @@ def create_app(
         "router": None,
         "mtime": None,
     }
+
+
+    _build_jobs: Dict[str, Dict[str, Any]] = {}
+    _build_jobs_lock = Lock()
+
+    uploads_root = data_root / "_uploads"
+    uploads_root.mkdir(parents=True, exist_ok=True)
+
+    def _set_build_job(job_id: str, **updates: Any) -> None:
+        with _build_jobs_lock:
+            current = _build_jobs.get(job_id, {}).copy()
+            current.update(updates)
+            current["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _build_jobs[job_id] = current
+
+    def _get_build_job(job_id: str) -> Optional[Dict[str, Any]]:
+        with _build_jobs_lock:
+            job = _build_jobs.get(job_id)
+            return dict(job) if job else None
+
+    def _safe_int(value: Any, fallback: int) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return fallback
+
+    def _slugify_dataset_name(name: str) -> str:
+        cleaned = _normalize_unicode_text(name).strip()
+        cleaned = re.sub(r"\.[A-Za-z0-9]+$", "", cleaned)
+        cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", cleaned)
+        cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+        return cleaned or f"dataset_{uuid4().hex[:8]}"
+
+    def _apply_pgvector_env_from_request(payload: Dict[str, Any]) -> bool:
+        sync_pgvector = str(payload.get("sync_pgvector", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+        if not sync_pgvector:
+            os.environ["CATALOG_PGVECTOR_ENABLED"] = "false"
+            return False
+
+        os.environ["CATALOG_PGVECTOR_ENABLED"] = "true"
+        os.environ["PGVECTOR_HOST"] = _normalize_unicode_text(payload.get("pgvector_host", "localhost")).strip() or "localhost"
+        os.environ["PGVECTOR_PORT"] = str(_safe_int(payload.get("pgvector_port", 5432), 5432))
+        os.environ["PGVECTOR_DB"] = _normalize_unicode_text(payload.get("pgvector_db", "postgres")).strip() or "postgres"
+        os.environ["PGVECTOR_USER"] = _normalize_unicode_text(payload.get("pgvector_user", "")).strip()
+        os.environ["PGVECTOR_PASSWORD"] = _normalize_unicode_text(payload.get("pgvector_password", "")).strip()
+        os.environ["PGVECTOR_TABLE"] = _normalize_unicode_text(payload.get("pgvector_table", "dataset_catalog_embeddings")).strip() or "dataset_catalog_embeddings"
+        return True
+
+    def _run_dataset_build_job(
+        *,
+        job_id: str,
+        uploaded_file_path: Path,
+        dataset_name: str,
+        num_tiles: int,
+        zoom: int,
+        threshold: int,
+        sync_pgvector: bool,
+    ) -> None:
+        try:
+            _set_build_job(
+                job_id,
+                status="running",
+                step="building_tiles",
+                message="Starting Starlet build...",
+            )
+
+            outdir = data_root / dataset_name
+            outdir.parent.mkdir(parents=True, exist_ok=True)
+
+            tile_result, mvt_result = starlet_build(
+                input=str(uploaded_file_path),
+                outdir=str(outdir),
+                num_tiles=num_tiles,
+                zoom=zoom,
+                threshold=threshold,
+            )
+
+            tiler_cache.pop(dataset_name, None)
+            _catalog_runtime["router"] = None
+            _catalog_runtime["mtime"] = None
+
+            _set_build_job(
+                job_id,
+                step="building_index",
+                message="Tiles generated. Rebuilding catalogue index...",
+                tile_result={
+                    "outdir": str(getattr(tile_result, "outdir", outdir)),
+                    "num_files": getattr(tile_result, "num_files", None),
+                    "total_rows": getattr(tile_result, "total_rows", None),
+                    "bbox": getattr(tile_result, "bbox", None),
+                },
+                mvt_result={
+                    "outdir": str(getattr(mvt_result, "outdir", outdir / "mvt")),
+                    "zoom_levels": getattr(mvt_result, "zoom_levels", None),
+                    "tile_count": getattr(mvt_result, "tile_count", None),
+                },
+            )
+
+            catalog = build_catalog_index(
+                data_root=data_root,
+                out_dir=data_root / "_catalog",
+                sync_pgvector=sync_pgvector,
+            )
+
+            _catalog_runtime["router"] = None
+            _catalog_runtime["mtime"] = None
+
+            _set_build_job(
+                job_id,
+                status="completed",
+                step="done",
+                message="Dataset uploaded, tiled, and indexed successfully.",
+                dataset=dataset_name,
+                output_dir=str(outdir),
+                catalog_entry_count=catalog.get("entry_count", 0),
+            )
+
+        except Exception as e:
+            logger.exception("[DatasetBuildJob] Failed for dataset=%s", dataset_name)
+            _set_build_job(
+                job_id,
+                status="failed",
+                step="error",
+                message=str(e),
+            )
 
     def get_tiler(dataset: str) -> VectorTiler:
         if dataset not in tiler_cache:
@@ -925,6 +1063,80 @@ def create_app(
             logger.exception("[ChatStyle] Failed for query=%r", user_query)
             return _json_response({"error": f"Chat styling failed: {e}"}, 500)
 
+    @app.post("/api/upload-dataset")
+    def upload_dataset_and_build():
+        try:
+            uploaded = request.files.get("file")
+            if uploaded is None or not uploaded.filename:
+                return _json_response({"error": "A dataset file is required under form field 'file'."}, 400)
+
+            dataset_name_raw = _normalize_unicode_text(request.form.get("dataset_name", uploaded.filename)).strip()
+            dataset_name = _slugify_dataset_name(dataset_name_raw)
+
+            num_tiles = max(1, _safe_int(request.form.get("num_tiles", 40), 40))
+            zoom = max(0, _safe_int(request.form.get("zoom", 7), 7))
+            threshold = max(0, _safe_int(request.form.get("threshold", 0), 0))
+
+            sync_pgvector = _apply_pgvector_env_from_request(request.form)
+
+            dataset_upload_dir = uploads_root / dataset_name
+            dataset_upload_dir.mkdir(parents=True, exist_ok=True)
+
+            original_name = secure_filename(uploaded.filename) or f"{dataset_name}.data"
+            uploaded_file_path = dataset_upload_dir / original_name
+            uploaded.save(str(uploaded_file_path))
+
+            job_id = uuid4().hex
+            _set_build_job(
+                job_id,
+                status="queued",
+                step="queued",
+                message="Upload received. Waiting to start build...",
+                dataset=dataset_name,
+                uploaded_file=str(uploaded_file_path),
+                num_tiles=num_tiles,
+                zoom=zoom,
+                threshold=threshold,
+                sync_pgvector=sync_pgvector,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+            worker = Thread(
+                target=_run_dataset_build_job,
+                kwargs={
+                    "job_id": job_id,
+                    "uploaded_file_path": uploaded_file_path,
+                    "dataset_name": dataset_name,
+                    "num_tiles": num_tiles,
+                    "zoom": zoom,
+                    "threshold": threshold,
+                    "sync_pgvector": sync_pgvector,
+                },
+                daemon=True,
+            )
+            worker.start()
+
+            return _json_response(
+                {
+                    "ok": True,
+                    "job_id": job_id,
+                    "dataset": dataset_name,
+                    "message": "Upload accepted. Build started.",
+                },
+                202,
+            )
+
+        except Exception as e:
+            logger.exception("[UploadDataset] Failed")
+            return _json_response({"error": f"Upload/build request failed: {e}"}, 500)
+
+    @app.get("/api/upload-dataset/<job_id>")
+    def get_upload_dataset_job(job_id: str):
+        job = _get_build_job(job_id)
+        if not job:
+            return _json_response({"error": f"Job not found: {job_id}"}, 404)
+        return _json_response(job, 200)
+
     @app.post("/api/query-styles")
     def query_styles():
         body = request.get_json(silent=True) or {}
@@ -997,7 +1209,7 @@ def create_app(
                 dataset_summary=dataset_summary,
                 user_query=user_query,
                 current_style=current_style,
-                previous_interaction_id=interaction_id or None,
+                previous_interaction_id=None,
                 provider_name="gemini",
                 temperature=0.2,
             )

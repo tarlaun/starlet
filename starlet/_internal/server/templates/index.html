@@ -246,6 +246,64 @@
       </section>
 
       <section class="card">
+        <h2 class="title" style="font-size:16px; margin-bottom:8px;">Upload + Build Dataset</h2>
+        <p class="subtitle" style="margin-bottom:12px;">
+          Upload a dataset file, generate Starlet tiles/MVTs, then rebuild the catalogue index.
+        </p>
+
+        <label for="uploadFile">Dataset file</label>
+        <input id="uploadFile" type="file" />
+
+        <div class="row" style="margin-top:10px;">
+          <div>
+            <label for="uploadDatasetName">Dataset name</label>
+            <input id="uploadDatasetName" type="text" placeholder="Example: TIGER2018_COUNTY" />
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <div>
+            <label for="uploadZoom">Zoom</label>
+            <input id="uploadZoom" type="number" value="7" min="0" />
+          </div>
+          <div>
+            <label for="uploadThreshold">Threshold</label>
+            <input id="uploadThreshold" type="number" value="0" min="0" />
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <div>
+            <label for="pgHost">PG host</label>
+            <input id="pgHost" type="text" value="localhost" />
+          </div>
+          <div>
+            <label for="pgPort">PG port</label>
+            <input id="pgPort" type="number" value="5432" />
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <div>
+            <label for="pgDb">PG database</label>
+            <input id="pgDb" type="text" value="postgres" />
+          </div>
+          <div>
+            <label for="pgUser">PG user</label>
+            <input id="pgUser" type="text" value="tarlan" />
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <button id="uploadBuildBtn" class="warning">Upload + Build</button>
+        </div>
+
+        <div class="hint" id="uploadStatusBox" style="margin-top:10px;">
+          No upload job yet.
+        </div>
+      </section>
+
+      <section class="card">
         <label for="promptBox">Prompt</label>
         <textarea id="promptBox" placeholder="Example: Show counties with AWATER as a blue gradient and a dark outline."></textarea>
 
@@ -312,6 +370,16 @@
       datasetLabel: document.getElementById("datasetLabel"),
       interactionLabel: document.getElementById("interactionLabel"),
       mapFrame: document.getElementById("mapFrame"),
+      uploadFile: document.getElementById("uploadFile"),
+      uploadDatasetName: document.getElementById("uploadDatasetName"),
+      uploadZoom: document.getElementById("uploadZoom"),
+      uploadThreshold: document.getElementById("uploadThreshold"),
+      pgHost: document.getElementById("pgHost"),
+      pgPort: document.getElementById("pgPort"),
+      pgDb: document.getElementById("pgDb"),
+      pgUser: document.getElementById("pgUser"),
+      uploadBuildBtn: document.getElementById("uploadBuildBtn"),
+      uploadStatusBox: document.getElementById("uploadStatusBox"),
     };
 
     function updateStatus() {
@@ -327,15 +395,15 @@
     }
 
     function applyStateToMap() {
-  postToMap({
-    type: "starlet:set-state",
-    payload: {
-      dataset: state.dataset || "",
-      source_layer: state.dataset || "",
-      style: state.currentStyle || null,
-    },
-  });
-}
+      postToMap({
+        type: "starlet:set-state",
+        payload: {
+          dataset: state.dataset || "",
+          source_layer: state.dataset || "",
+          style: state.currentStyle || null,
+        },
+      });
+    }
 
     async function postJSON(url, payload) {
       const resp = await fetch(url, {
@@ -365,6 +433,108 @@
       state.currentStyle = data.style || state.currentStyle || null;
       state.lastAssistantResponse = data.assistant_response || "";
       updateStatus();
+    }
+
+    let currentUploadJobId = "";
+
+    function setUploadStatus(message) {
+      els.uploadStatusBox.textContent = message || "No upload job yet.";
+    }
+
+    async function uploadAndBuildDataset() {
+      const file = els.uploadFile.files && els.uploadFile.files[0];
+      if (!file) {
+        setUploadStatus("Please choose a dataset file first.");
+        return;
+      }
+
+      const form = new FormData();
+      form.append("file", file);
+      form.append("dataset_name", els.uploadDatasetName.value.trim() || file.name);
+
+      // Hardcoded demo defaults
+      form.append("num_tiles", "40");
+      form.append("zoom", String(els.uploadZoom.value || 7));
+      form.append("threshold", String(els.uploadThreshold.value || 0));
+      form.append("sync_pgvector", "true");
+      form.append("pgvector_host", els.pgHost.value.trim());
+      form.append("pgvector_port", String(els.pgPort.value || 5432));
+      form.append("pgvector_db", els.pgDb.value.trim());
+      form.append("pgvector_user", els.pgUser.value.trim());
+      form.append("pgvector_password", "");
+      form.append("pgvector_table", "dataset_catalog_embeddings");
+
+      els.uploadBuildBtn.disabled = true;
+      els.uploadBuildBtn.textContent = "Uploading...";
+      setUploadStatus("Uploading dataset...");
+
+      try {
+        const resp = await fetch("/api/upload-dataset", {
+          method: "POST",
+          body: form,
+        });
+
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error((data && data.error) || `Upload failed (${resp.status})`);
+        }
+
+        currentUploadJobId = data.job_id || "";
+        setUploadStatus(`Job started for dataset ${data.dataset}. Waiting for progress...`);
+        pollUploadJob();
+      } catch (err) {
+        setUploadStatus(`Error: ${err.message}`);
+        els.uploadBuildBtn.disabled = false;
+        els.uploadBuildBtn.textContent = "Upload + Build";
+      }
+    }
+
+    async function pollUploadJob() {
+      if (!currentUploadJobId) return;
+
+      try {
+        const resp = await fetch(`/api/upload-dataset/${currentUploadJobId}`);
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          throw new Error((data && data.error) || `Job polling failed (${resp.status})`);
+        }
+
+        const status = data.status || "unknown";
+        const step = data.step || "unknown";
+        const msg = data.message || "";
+        const dataset = data.dataset || "";
+
+        setUploadStatus(`Dataset: ${dataset} | Status: ${status} | Step: ${step} | ${msg}`);
+
+        if (status === "completed") {
+          els.uploadBuildBtn.disabled = false;
+          els.uploadBuildBtn.textContent = "Upload + Build";
+
+          if (dataset) {
+            state.dataset = dataset;
+            state.interactionId = "";
+            state.selectedAttributes = [];
+            state.currentStyle = null;
+            state.lastAssistantResponse = `Dataset ${dataset} is ready. You can style it now.`;
+            updateStatus();
+            applyStateToMap();
+          }
+          return;
+        }
+
+        if (status === "failed") {
+          els.uploadBuildBtn.disabled = false;
+          els.uploadBuildBtn.textContent = "Upload + Build";
+          return;
+        }
+
+        setTimeout(pollUploadJob, 1500);
+      } catch (err) {
+        setUploadStatus(`Polling error: ${err.message}`);
+        els.uploadBuildBtn.disabled = false;
+        els.uploadBuildBtn.textContent = "Upload + Build";
+      }
     }
 
     async function suggestStyle() {
@@ -440,6 +610,7 @@
       postToMap({ type: "starlet:reset" });
     }
 
+    els.uploadBuildBtn.addEventListener("click", uploadAndBuildDataset);
     els.styleBtn.addEventListener("click", suggestStyle);
     els.codeBtn.addEventListener("click", generateMapCode);
     els.runBtn.addEventListener("click", runCode);
