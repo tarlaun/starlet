@@ -125,29 +125,47 @@ The runtime provides:
 - api.setDataset(datasetName)
 - api.applyStyle(styleObject)
 - api.ensureDatasetLayer()
-- api.fitLayer()
+- api.fitToDataset(datasetName)
+- api.addLabels(options)
 - api.reset()
 - api.getState()
-- api.getDatasetStats(datasetName)
 
 It also provides:
 - map        (MapLibre map instance)
 - maplibregl (MapLibre namespace)
-- state      (current runtime state snapshot)
+
+Important style schema rules:
+- For normal structured styling with api.applyStyle(...), use:
+  - renderer.mode = "single" | "categorical" | "gradient"
+- For gradient mode, provide:
+  - renderer.attribute
+  - renderer.min
+  - renderer.max
+  - renderer.colors
+- Do NOT use renderer.stops for the normal gradient renderer unless you are building fully custom MapLibre layers yourself.
+- Prefer style_type values such as:
+  - fill-gradient
+  - fill-categorical
+  - fill-single-color
+  - line-gradient
+  - line-categorical
+  - line-single-color
+  - circle-gradient
+  - circle-categorical
+  - circle-single-color
 
 Rules:
 - Return raw JavaScript only.
 - Do NOT return JSON.
 - Do NOT return Markdown fences.
 - Do NOT explain the code before or after it.
-- The code should usually call api.setDataset(...) first if a dataset is known.
-- Prefer using the provided structured style via api.applyStyle(...) unless the user explicitly asks for something custom.
-- You may directly manipulate the map after ensuring the dataset layer exists.
+- Call api.setDataset(...) first if a dataset is known.
+- Prefer using the provided structured style via api.applyStyle(...) unless the user explicitly asks for fully custom MapLibre layers.
+- Use api.fitToDataset(datasetName) instead of api.fitLayer().
 - Do not invent unavailable server endpoints.
 - Do not generate HTML.
 - Do not wrap the code in an IIFE unless needed.
 """
-
 def _strip_code_fences(text: str) -> str:
     cleaned = str(text or "").strip()
     cleaned = re.sub(r"^```(?:javascript|js|json)?\s*", "", cleaned, flags=re.IGNORECASE)
