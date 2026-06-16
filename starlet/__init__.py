@@ -207,7 +207,11 @@ def generate_mvt(
     from starlet._internal.mvt.generator import BucketMVTGenerator
 
     parquet_dir = str(Path(tile_dir) / "parquet_tiles")
-    hist_path = str(Path(tile_dir) / "histograms" / "global.npy")
+    # Prefer the precomputed integral image written by the tiling stage; fall
+    # back to the raw histogram (recomputing the prefix sum) for older datasets.
+    hist_dir = Path(tile_dir) / "histograms"
+    prefix_path = hist_dir / "global_prefix.npy"
+    hist_path = str(prefix_path if prefix_path.exists() else hist_dir / "global.npy")
     mvt_outdir = outdir or str(Path(tile_dir) / "mvt")
 
     gen = BucketMVTGenerator(
