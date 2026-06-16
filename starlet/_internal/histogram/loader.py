@@ -11,6 +11,12 @@ class HistogramLoader:
 
     def load(self):
         logger.info(f"Loading histogram from {self.hist_path}")
-        hist = np.load(self.hist_path)
-        self.prefix = hist.cumsum(axis=0).cumsum(axis=1)
+        arr = np.load(self.hist_path)
+        # ``global_prefix.npy`` already holds the 2D prefix-sum (integral image)
+        # written by the tiling stage; ``global.npy`` is the raw histogram and
+        # still needs the cumulative sums computed here.
+        if str(self.hist_path).endswith("_prefix.npy"):
+            self.prefix = arr
+        else:
+            self.prefix = arr.cumsum(axis=0).cumsum(axis=1)
         return self.prefix
