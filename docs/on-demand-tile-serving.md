@@ -5,6 +5,12 @@ path (the server's third tier, used when a requested tile is neither in the
 in-memory cache nor pre-generated on disk). It is intended as source material
 for the evaluation/serving section of the paper.
 
+**Pre-generation policy.** The batch pyramid (`starlet mvt --zoom z_max --threshold τ`)
+holds every tile with `z ≤ z_max` whose histogram **vertex-density ≥ τ** (and that
+receives ≥ 1 feature); tiles at `z > z_max` are generated on demand by the path
+below. τ is a vertex-density threshold, *not* a feature count. The experiments use
+`z_max = 7`, `τ = 0`, i.e. all non-empty tiles up to z7 (4389 tiles).
+
 ## Problem
 
 For a tile request `(z, x, y)` outside the pre-generated pyramid, the server
