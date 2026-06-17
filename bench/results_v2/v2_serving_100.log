@@ -1,0 +1,17 @@
+dataset=osm_parks_100  parent=results/starlet_v2  deepest_pyramid_zoom=7
+
+== PYRAMID zooms (warm_disk + warm_mem) ==
+  z4 warm_disk           n=25  p50=    2.39ms  p95=   13.84ms  max=   18.59ms  bytes[min/med/max]=15/22328/1194006  nonempty=24/25
+  z4 warm_mem            n=25  p50=    1.84ms  p95=    2.19ms  max=    2.33ms  bytes[min/med/max]=15/22328/1194006  nonempty=24/25
+  z7 warm_disk           n=25  p50=    1.99ms  p95=    8.31ms  max=   19.03ms  bytes[min/med/max]=139/10712/1458293  nonempty=25/25
+  z7 warm_mem            n=25  p50=    1.75ms  p95=    2.34ms  max=    3.32ms  bytes[min/med/max]=139/10712/1458293  nonempty=25/25
+
+== ON-THE-FLY zooms beyond pyramid (otf cold-ish + warm_mem) ==
+  z8 otf                 n=25  p50=  231.74ms  p95=14254.09ms  max=24450.38ms  bytes[min/med/max]=15/1191/1391947  nonempty=19/25
+  z8 warm_mem            n=25  p50=    1.63ms  p95=    2.09ms  max=    2.43ms  bytes[min/med/max]=15/1191/1391947  nonempty=19/25
+  z10 otf                n=25  p50=  133.96ms  p95= 1105.67ms  max= 1411.42ms  bytes[min/med/max]=15/15/63425  nonempty=11/25
+  z10 warm_mem           n=25  p50=    1.61ms  p95=    1.67ms  max=    1.95ms  bytes[min/med/max]=15/15/63425  nonempty=11/25
+  z13 otf                n=25  p50=  103.98ms  p95=  269.59ms  max=  339.82ms  bytes[min/med/max]=15/15/2554  nonempty=6/25
+  z13 warm_mem           n=25  p50=    1.62ms  p95=    1.65ms  max=    2.03ms  bytes[min/med/max]=15/15/2554  nonempty=6/25
+
+DONE. regime_failures=0

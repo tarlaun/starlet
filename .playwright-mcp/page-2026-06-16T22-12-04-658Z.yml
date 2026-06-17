@@ -1,0 +1,117 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - navigation [ref=e4]:
+      - list [ref=e5]:
+        - listitem [ref=e6]:
+          - link "Menu" [ref=e7] [cursor=pointer]:
+            - /url: "#menu"
+  - generic [ref=e9]:
+    - banner [ref=e10]:
+      - generic [ref=e11]: Scalable Geospatial Visualization
+      - heading "StarMap" [level=1] [ref=e12]
+      - paragraph [ref=e13]: StarMap is an open research initiative focused on building scalable, high-performance systems for visualizing and analyzing massive geospatial datasets.
+      - paragraph [ref=e14]:
+        - text: Alongside the core research effort, StarMap includes
+        - strong [ref=e15]: Starlet
+        - text: ", a lightweight interface and codebase for practical exploration workflows, as well as a hands-on"
+        - strong [ref=e16]: workshop
+        - text: introducing participants to geospatial visualization and StarMap tooling.
+      - generic [ref=e17]:
+        - generic [ref=e18]:
+          - generic [ref=e19]: Focus
+          - paragraph [ref=e20]:
+            - strong [ref=e21]: Scalable geospatial systems
+        - generic [ref=e22]:
+          - generic [ref=e23]: Explore
+          - paragraph [ref=e24]:
+            - strong [ref=e25]: Starlet on GitHub
+        - generic [ref=e26]:
+          - generic [ref=e27]: Past Events
+          - paragraph [ref=e28]:
+            - strong [ref=e29]: Workshop • April 13, 2026
+      - list [ref=e30]:
+        - listitem [ref=e31]:
+          - link "Open Starlet on GitHub" [ref=e32] [cursor=pointer]:
+            - /url: https://github.com/rohanbennur43/starlet
+        - listitem [ref=e33]:
+          - link "View Workshop" [ref=e34] [cursor=pointer]:
+            - /url: workshop.html
+    - generic [ref=e35]:
+      - generic [ref=e36]:
+        - generic [ref=e38]: 
+        - heading "Explore the Map" [level=2] [ref=e39]
+      - paragraph [ref=e41]: Pan and zoom an interactive map served straight from StarMap's pre-generated vector-tile pyramid. Pick a dataset, color it by any attribute — as discrete categories or a continuous gradient — and choose a label to display on the map.
+      - generic [ref=e42]:
+        - generic [ref=e44]:
+          - generic:
+            - generic [ref=e46]:
+              - button "+" [ref=e47] [cursor=pointer]
+              - button "–" [ref=e48] [cursor=pointer]
+            - button "i" [ref=e50] [cursor=pointer]
+        - generic [ref=e51]:
+          - generic [ref=e52]:
+            - heading "Visualization" [level=3] [ref=e53]
+            - paragraph [ref=e54]: Natural Earth admin-1 boundaries — 4,594 states, provinces, regions and counties worldwide.
+          - generic [ref=e55]:
+            - generic [ref=e56]:
+              - generic [ref=e57]: Dataset
+              - combobox "Dataset" [ref=e58] [cursor=pointer]:
+                - option "World States & Provinces" [selected]
+            - generic [ref=e59]:
+              - generic [ref=e60]: Color by
+              - combobox "Color by" [ref=e61] [cursor=pointer]:
+                - option "Categorical" [selected]
+                - option "Gradient"
+                - option "Single color"
+            - generic [ref=e62]:
+              - generic [ref=e63]: Attribute
+              - combobox "Attribute" [ref=e64] [cursor=pointer]
+            - generic [ref=e65]:
+              - generic [ref=e66]: Label
+              - combobox "Label" [ref=e67] [cursor=pointer]
+            - generic [ref=e68]:
+              - generic [ref=e69]: Fill opacity
+              - slider "Fill opacity" [ref=e70]: "0.82"
+    - generic [ref=e72]:
+      - generic [ref=e73]:
+        - generic [ref=e75]: 
+        - heading "Explore StarMap" [level=2] [ref=e76]
+      - paragraph [ref=e77]: Use the links below to jump directly to the two main entry points of the project.
+      - generic [ref=e78]:
+        - link " Starlet A lightweight codebase and interface for interactive geospatial exploration. Open the project repository directly Access the code, setup, and development workflow Best entry point for implementation and experimentation Go to GitHub " [ref=e79] [cursor=pointer]:
+          - /url: https://github.com/rohanbennur43/starlet
+          - generic [ref=e81]: 
+          - heading "Starlet" [level=2] [ref=e82]
+          - paragraph [ref=e83]: A lightweight codebase and interface for interactive geospatial exploration.
+          - list [ref=e84]:
+            - listitem [ref=e85]: Open the project repository directly
+            - listitem [ref=e86]: Access the code, setup, and development workflow
+            - listitem [ref=e87]: Best entry point for implementation and experimentation
+          - generic [ref=e88]:
+            - text: Go to GitHub
+            - generic [ref=e89]: 
+        - link " Workshop Learn about the StarMap workshop including schedule, registration and sessions. Two guided sessions with a lunch break Geospatial visualization, StarMap setup, and styling Includes LLM workflows and a competition Open workshop page " [ref=e90] [cursor=pointer]:
+          - /url: workshop.html
+          - generic [ref=e92]: 
+          - heading "Workshop" [level=2] [ref=e93]
+          - paragraph [ref=e94]: Learn about the StarMap workshop including schedule, registration and sessions.
+          - list [ref=e95]:
+            - listitem [ref=e96]: Two guided sessions with a lunch break
+            - listitem [ref=e97]: Geospatial visualization, StarMap setup, and styling
+            - listitem [ref=e98]: Includes LLM workflows and a competition
+          - generic [ref=e99]:
+            - text: Open workshop page
+            - generic [ref=e100]: 
+  - contentinfo [ref=e101]:
+    - generic [ref=e102]:
+      - generic [ref=e103]:
+        - generic [ref=e104]:
+          - generic [ref=e106]: 
+          - heading "Contact" [level=2] [ref=e107]
+        - generic [ref=e108]:
+          - link "" [ref=e109] [cursor=pointer]:
+            - /url: mailto:tbaha001@ucr.edu
+          - generic [ref=e110]: "Email: tbaha001[at]ucr.edu"
+      - list [ref=e111]:
+        - listitem [ref=e112]: © 2026 StarMap Project
+        - listitem [ref=e113]: Design adapted from HTML5 UP

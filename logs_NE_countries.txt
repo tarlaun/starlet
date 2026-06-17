@@ -1,0 +1,2 @@
+INFO:bucket_mvt:Loading histogram from datasets/NE_countries/histograms/global.npy
+INFO:bucket_mvt:Complete. Wrote 5790 MVT tiles to datasets/NE_countries/mvt
