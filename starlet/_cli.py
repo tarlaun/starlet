@@ -53,10 +53,13 @@ def main():
 @click.option("--sfc-bits", type=int, default=16, show_default=True, help="Bits per axis for Z-order key.")
 @click.option("--max-parallel-files", type=int, default=64, show_default=True, help="Max concurrent tile writes.")
 @click.option("--index", default=None, help="Legacy CSV index file (overrides --num-tiles).")
+@click.option("--covering-bbox/--no-covering-bbox", default=False, show_default=True,
+              help="Opt-in: write per-row bbox covering columns + bounded row groups for "
+                   "fast on-demand serving. Off by default (faster batch tiling, smaller files).")
 @click.option("--log-level", default="INFO", show_default=True, help="Logging level.")
 def tile(input_path, outdir, num_tiles, partition_size, sort, compression,
          sample_cap, sample_ratio, seed, geom_col, sfc_bits, max_parallel_files,
-         index, log_level):
+         index, covering_bbox, log_level):
     """Partition a geospatial dataset into spatially-tiled Parquet files."""
     _setup_logging(log_level)
     import starlet
@@ -75,6 +78,7 @@ def tile(input_path, outdir, num_tiles, partition_size, sort, compression,
         sfc_bits=sfc_bits,
         max_parallel_files=max_parallel_files,
         index=index,
+        covering_bbox=covering_bbox,
     )
     click.echo(f"Tiling complete: {result.num_files} tiles, {result.total_rows} rows")
     click.echo(f"  Output: {result.outdir}")

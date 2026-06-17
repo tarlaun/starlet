@@ -21,11 +21,31 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import shapely
 from shapely import from_wkb
 
 from .utils_large import ensure_large_types
 
 logger = logging.getLogger(__name__)
+
+# Optional read-time pruning (opt-in via ``covering_bbox``): four per-row
+# bounding-box "covering" columns + bounded, spatially-coherent row groups so
+# the on-demand tile server can skip row groups/rows at read time. Off by
+# default — writing them is pure overhead unless you serve tiles on the fly.
+BBOX_COLS = ("_bbox_xmin", "_bbox_ymin", "_bbox_xmax", "_bbox_ymax")
+DEFAULT_ROW_GROUP_SIZE = 16384
+
+
+def _append_bbox_columns(tbl: pa.Table, geom_col: str) -> pa.Table:
+    """Append per-row bbox covering columns computed from the geometry column."""
+    if tbl.num_rows == 0:
+        return tbl
+    geoms = from_wkb(tbl[geom_col].to_numpy(zero_copy_only=False))
+    per = np.asarray(shapely.bounds(geoms), dtype=np.float64).reshape(tbl.num_rows, 4)
+    for i, name in enumerate(BBOX_COLS):
+        col = pa.array(np.ascontiguousarray(per[:, i], dtype=np.float64), type=pa.float64())
+        tbl = tbl.append_column(name, col)
+    return tbl
 
 
 # ------------------------- Sorting configuration -------------------------
@@ -54,6 +74,7 @@ class _WriterPoolConfig:
     compression: Optional[str]
     pq_args: Dict[str, Any]
     outdir: str
+    covering_bbox: bool = False
 
 
 # ------------------------- Space-filling helpers -------------------------
@@ -221,6 +242,10 @@ def _finalize_one_tile(
         sfc_bits=config.sfc_bits,
         global_extent=config.global_extent,
     )
+    # Optional: per-row covering columns for read-time pruning (off by default).
+    if config.covering_bbox:
+        combined = _append_bbox_columns(combined, config.geom_col)
+
     combined = _with_updated_geo_metadata(combined, bbox)
 
     # Encode bbox in filename for ParquetIndex spatial lookups
@@ -237,6 +262,10 @@ def _finalize_one_tile(
     write_args = dict(config.pq_args)
     if config.compression is not None:
         write_args.setdefault("compression", config.compression)
+    # Bounded, spatially-coherent row groups make the covering-column statistics
+    # a tight read-time filter; only meaningful alongside the covering columns.
+    if config.covering_bbox and combined.num_rows:
+        write_args.setdefault("row_group_size", min(combined.num_rows, DEFAULT_ROW_GROUP_SIZE))
 
     pq.write_table(combined, out_path, **write_args)
     return out_path
@@ -258,6 +287,7 @@ class WriterPool:
         global_extent: Optional[Tuple[float, float, float, float]] = None,
         compression: Optional[str] = "zstd",
         max_parallel_files: Optional[int] = None,
+        covering_bbox: bool = False,
         **pq_args: Any,
     ):
         self.outdir = outdir
@@ -266,6 +296,7 @@ class WriterPool:
         self.sfc_bits = int(sfc_bits)
         self.global_extent = global_extent
         self.compression = compression
+        self.covering_bbox = bool(covering_bbox)
         self.max_parallel_files = max(
             1,
             int(max_parallel_files or max(1, multiprocessing.cpu_count() - 1)),
@@ -317,6 +348,7 @@ class WriterPool:
             compression=self.compression,
             pq_args=dict(self._pq_args),
             outdir=self.outdir,
+            covering_bbox=self.covering_bbox,
         )
 
         if total == 1:

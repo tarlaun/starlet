@@ -78,7 +78,7 @@ class VectorTiler:
 
         for pf in intersecting:
             try:
-                gdf = self.index.load_and_reproject(pf)
+                gdf = self.index.load_and_reproject(pf, bounds.bbox_4326)
             except Exception as e:
                 logger.error("[TileGen] z=%d x=%d y=%d load failed %s: %s", z, x, y, pf, e)
                 continue

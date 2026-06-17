@@ -32,6 +32,7 @@ def tile(
     sfc_bits: int = 16,
     max_parallel_files: int = 64,
     index: str | None = None,
+    covering_bbox: bool = False,
 ) -> TileResult:
     """Partition a GeoParquet/GeoJSON dataset into spatially-tiled Parquet files.
 
@@ -65,6 +66,12 @@ def tile(
         Maximum concurrent tile files during write.
     index : str | None
         Path to a legacy CSV index file. When provided, *num_tiles* is ignored.
+    covering_bbox : bool
+        Opt-in read-time pruning. If True, write per-row bbox covering columns
+        and bounded, spatially-coherent row groups so the tile server can skip
+        row groups/rows at read time (fast on-demand serving, at the cost of
+        larger files and slower writes). Default False — the fast batch-tiling
+        behaviour; on-demand tiles then read whole partitions.
 
     Returns
     -------
@@ -127,6 +134,7 @@ def tile(
         compression=compression,
         sort_mode=sort_mode,
         sfc_bits=sfc_bits,
+        covering_bbox=covering_bbox,
     )
     orchestrator.run()
 
