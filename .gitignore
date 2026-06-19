@@ -44,3 +44,11 @@ benchmarks/benchmark_results.*
 
 # AI assistant documentation
 CLAUDE.md
+
+# Benchmarks, reports, and dev/session artifacts (not part of the package)
+bench/
+bench_scratch/
+.playwright-mcp/
+*.pdf
+*.log
+HANDOFF.md
