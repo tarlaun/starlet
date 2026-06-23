@@ -58,6 +58,18 @@ class AttributeStatsCollector:
             values = arr.to_pylist()
             sketch.update(values)
 
+    def merge(self, other: "AttributeStatsCollector"):
+        """Merge another collector's sketches into this one (for parallel
+        stats collection across workers). Sketches present in ``other`` but not
+        here are adopted as-is."""
+        for name, other_sketch in other.sketches.items():
+            mine = self.sketches.get(name)
+            if mine is None:
+                self.sketches[name] = other_sketch
+            else:
+                mine.merge(other_sketch)
+        return self
+
     def finalize(self):
         out = []
 

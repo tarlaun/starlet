@@ -12,9 +12,8 @@ import pytest
 
 from starlet._internal.tiling.RSGrove import (
     EnvelopeNDLite,
-    AuxiliarySearchStructure,
+    KDPartitionTree,
     RSGrovePartitioner,
-    BeastOptions,
     partition_points,
     partition_weighted_points,
 )
@@ -78,39 +77,56 @@ class TestEnvelopeNDLite:
         assert env.getMaxCoord(1) == 7.0
 
 
-class TestAuxiliarySearchStructure:
-    """Test the overlap search structure for partition lookup."""
+class TestKDPartitionTree:
+    """Test compact kd-tree partition lookup helper."""
 
-    def test_build_and_search(self):
-        """Test building index and searching for overlapping partitions."""
-        boxes = [
-            EnvelopeNDLite(np.array([0.0, 0.0]), np.array([10.0, 10.0])),
-            EnvelopeNDLite(np.array([5.0, 5.0]), np.array([15.0, 15.0])),
-            EnvelopeNDLite(np.array([20.0, 20.0]), np.array([30.0, 30.0])),
+    def test_single_leaf_finalize_searches_to_only_partition(self):
+        tree = KDPartitionTree()
+
+        assert tree.assign_partition_ids() == 1
+        assert tree.rows.shape == (0, 4)
+        assert tree.search(100.0, -100.0) == 0
+
+    def test_finalize_and_search(self):
+        tree = KDPartitionTree()
+
+        assert len(tree) == 1
+        assert np.isnan(tree.rows[0, 0])
+        assert tree.rows[0, 1:].tolist() == [-1.0, 0.0, 0.0]
+
+        lower, higher = tree.add_split(0, 0, 5.0)
+        assert (lower, higher) == (1, 2)
+
+        lower_lower, lower_higher = tree.add_split(lower, 1, 3.0)
+        assert (lower_lower, lower_higher) == (3, 4)
+
+        assert tree.rows[:, 1:].tolist() == [
+            [0.0, 1.0, 2.0],
+            [1.0, 3.0, 4.0],
+            [-1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+        ]
+        assert tree.rows[:2, 0].tolist() == [5.0, 3.0]
+        assert np.isnan(tree.rows[2:, 0]).all()
+
+        assert tree.assign_partition_ids() == 3
+        assert tree.rows.tolist() == [
+            [5.0, 0.0, 1.0, -3.0],
+            [3.0, 1.0, -1.0, -2.0],
         ]
 
-        aux = AuxiliarySearchStructure()
-        aux.build(boxes)
+        assert tree.search(1.0, 1.0) == 0
+        assert tree.search(1.0, 4.0) == 1
+        assert tree.search(6.0, 1.0) == 2
 
-        # Query overlapping first two boxes
-        query = EnvelopeNDLite(np.array([7.0, 7.0]), np.array([12.0, 12.0]))
-        result = aux.search(query)
-        assert len(result) == 2
-        assert 0 in result
-        assert 1 in result
-
-    def test_search_no_overlap(self):
-        """Test searching for non-overlapping query."""
-        boxes = [
-            EnvelopeNDLite(np.array([0.0, 0.0]), np.array([10.0, 10.0])),
-        ]
-
-        aux = AuxiliarySearchStructure()
-        aux.build(boxes)
-
-        query = EnvelopeNDLite(np.array([20.0, 20.0]), np.array([30.0, 30.0]))
-        result = aux.search(query)
-        assert len(result) == 0
+        global_mbr = EnvelopeNDLite(np.array([0.0, 0.0]), np.array([10.0, 10.0]))
+        assert tree.getPartitionMBR(0, global_mbr).mins.tolist() == [0.0, 0.0]
+        assert tree.getPartitionMBR(0, global_mbr).maxs.tolist() == [5.0, 3.0]
+        assert tree.getPartitionMBR(1, global_mbr).mins.tolist() == [0.0, 3.0]
+        assert tree.getPartitionMBR(1, global_mbr).maxs.tolist() == [5.0, 10.0]
+        assert tree.getPartitionMBR(2, global_mbr).mins.tolist() == [5.0, 0.0]
+        assert tree.getPartitionMBR(2, global_mbr).maxs.tolist() == [10.0, 10.0]
 
 
 class TestPartitionFunctions:
@@ -122,8 +138,7 @@ class TestPartitionFunctions:
         np.random.seed(42)
         coords = np.random.rand(2, 100) * 100.0
 
-        boxes = partition_points(coords, min_cap=10, max_cap=30,
-                                expand_to_inf=False, fraction_min_split=0.0)
+        boxes = partition_points(coords, min_cap=10, max_cap=30, fraction_min_split=0.0)
 
         assert len(boxes) > 0
         # With 100 points and max_cap=30, expect 4-10 partitions
@@ -137,8 +152,7 @@ class TestPartitionFunctions:
 
         boxes = partition_weighted_points(
             coords, weights,
-            min_cap_w=20.0, max_cap_w=60.0,
-            expand_to_inf=False, fraction_min_split=0.0
+            min_cap_w=20.0, max_cap_w=60.0, fraction_min_split=0.0
         )
 
         assert len(boxes) > 0
@@ -148,8 +162,12 @@ class TestPartitionFunctions:
         np.random.seed(42)
         coords = np.random.rand(2, 50) * 100.0
 
-        boxes = partition_points(coords, min_cap=5, max_cap=15,
-                                expand_to_inf=True, fraction_min_split=0.0)
+        partitioner = partition_points(coords, min_cap=5, max_cap=15, fraction_min_split=0.0)
+        global_mbr = EnvelopeNDLite.from_points(coords)
+        boxes = [
+            partitioner.getPartitionMBR(partition_id, global_mbr)
+            for partition_id in range(partitioner.numPartitions())
+        ]
 
         # Check each point is covered by at least one box
         for i in range(coords.shape[1]):
@@ -164,47 +182,26 @@ class TestPartitionFunctions:
     def test_partition_empty_input(self):
         """Test partitioning with no points."""
         coords = np.empty((2, 0), dtype=float)
-        boxes = partition_points(coords, min_cap=1, max_cap=10,
-                                expand_to_inf=False, fraction_min_split=0.0)
+        partitioner = partition_points(coords, min_cap=1, max_cap=10, fraction_min_split=0.0)
         # Should handle gracefully, may return empty or single box
-        assert isinstance(boxes, list)
+        assert isinstance(partitioner, KDPartitionTree)
 
 
 class TestRSGrovePartitioner:
     """Test the main RSGrove partitioner class."""
 
-    def test_setup(self):
-        """Test partitioner configuration."""
-        partitioner = RSGrovePartitioner()
-        conf = BeastOptions({
-            "mmratio": 0.9,
-            "RSGrove.MinSplitRatio": 0.1,
-            "RSGrove.ExpandToInf": True
-        })
-        partitioner.setup(conf, disjoint=True)
-
-        assert partitioner.mMRatio == 0.9
-        assert partitioner.fractionMinSplitSize == 0.1
-        assert partitioner.expandToInf is True
-        assert partitioner.isDisjoint()
-
     def test_construct_unweighted(self, mock_summary, sample_coords_2d):
         """Test constructing partitions without histogram weighting."""
         partitioner = RSGrovePartitioner()
-        conf = BeastOptions()
-        partitioner.setup(conf, disjoint=True)
 
         partitioner.construct(mock_summary, sample_coords_2d,
                              histogram=None, numPartitions=5)
 
         assert partitioner.numPartitions() > 0
-        assert partitioner.getCoordinateDimension() == 2
 
     def test_construct_weighted(self, mock_summary, mock_histogram):
         """Test constructing partitions with histogram weighting."""
         partitioner = RSGrovePartitioner()
-        conf = BeastOptions()
-        partitioner.setup(conf, disjoint=True)
 
         # Sample some points
         np.random.seed(42)
@@ -215,26 +212,10 @@ class TestRSGrovePartitioner:
 
         assert partitioner.numPartitions() > 0
 
-    def test_overlap_partitions(self, mock_summary, sample_coords_2d):
-        """Test finding partitions that overlap a query envelope."""
-        partitioner = RSGrovePartitioner()
-        conf = BeastOptions()
-        partitioner.setup(conf, disjoint=False)
-        partitioner.construct(mock_summary, sample_coords_2d,
-                             histogram=None, numPartitions=5)
-
-        # Query a region
-        query = EnvelopeNDLite(np.array([20.0, 20.0]), np.array([30.0, 30.0]))
-        result = partitioner.overlapPartitions(query)
-
-        assert isinstance(result, list)
-        assert len(result) >= 1  # Should overlap at least one partition
 
     def test_overlap_partition_single(self, mock_summary, sample_coords_2d):
         """Test selecting single best partition for an envelope."""
         partitioner = RSGrovePartitioner()
-        conf = BeastOptions()
-        partitioner.setup(conf, disjoint=False)
         partitioner.construct(mock_summary, sample_coords_2d,
                              histogram=None, numPartitions=5)
 
@@ -246,45 +227,13 @@ class TestRSGrovePartitioner:
     def test_empty_envelope_random_assignment(self, mock_summary, sample_coords_2d):
         """Test that empty envelopes get random partition assignment."""
         partitioner = RSGrovePartitioner()
-        conf = BeastOptions()
-        partitioner.setup(conf, disjoint=True)
         partitioner.construct(mock_summary, sample_coords_2d,
                              histogram=None, numPartitions=5)
 
-        empty = EnvelopeNDLite(np.array([0.0, 0.0]), np.array([0.0, 0.0]))
-        empty.setEmpty()  # Use setEmpty() method to create proper empty envelope
-        result = partitioner.overlapPartitions(empty)
+        result = partitioner.overlapPartition([])
 
         # Should assign to exactly one random partition
-        assert len(result) == 1
-        assert 0 <= result[0] < partitioner.numPartitions()
-
-    def test_get_partition_mbr(self, mock_summary, sample_coords_2d):
-        """Test retrieving partition bounding box."""
-        partitioner = RSGrovePartitioner()
-        conf = BeastOptions()
-        partitioner.setup(conf, disjoint=True)
-        partitioner.construct(mock_summary, sample_coords_2d,
-                             histogram=None, numPartitions=3)
-
-        mbr_out = EnvelopeNDLite(np.array([0.0]), np.array([0.0]))
-        partitioner.getPartitionMBR(0, mbr_out)
-
-        assert mbr_out.getCoordinateDimension() == 2
-        assert not mbr_out.isEmpty()
-
-    def test_get_envelope(self, mock_summary, sample_coords_2d):
-        """Test retrieving global envelope."""
-        partitioner = RSGrovePartitioner()
-        conf = BeastOptions()
-        partitioner.setup(conf, disjoint=True)
-        partitioner.construct(mock_summary, sample_coords_2d,
-                             histogram=None, numPartitions=3)
-
-        env = partitioner.getEnvelope()
-        assert env.getCoordinateDimension() == 2
-        assert env.getMinCoord(0) == 0.0
-        assert env.getMaxCoord(0) == 100.0
+        assert 0 <= result < partitioner.numPartitions()
 
     def test_compute_point_weights(self, mock_histogram):
         """Test weight computation from histogram."""
@@ -300,8 +249,6 @@ class TestRSGrovePartitioner:
     def test_partition_with_fabricated_points(self, mock_summary):
         """Test that empty sample triggers point fabrication."""
         partitioner = RSGrovePartitioner()
-        conf = BeastOptions()
-        partitioner.setup(conf, disjoint=True)
 
         empty_sample = np.empty((2, 0), dtype=float)
         partitioner.construct(mock_summary, empty_sample,
@@ -317,21 +264,18 @@ class TestEdgeCases:
     def test_single_point_partition(self):
         """Test partitioning a single point."""
         coords = np.array([[5.0], [5.0]])
-        boxes = partition_points(coords, min_cap=1, max_cap=10,
-                                expand_to_inf=False, fraction_min_split=0.0)
-        assert len(boxes) == 1
+        partitioner = partition_points(coords, min_cap=1, max_cap=10, fraction_min_split=0.0)
+        assert partitioner.numPartitions() == 1
 
     def test_two_points_partition(self):
         """Test partitioning exactly two points."""
         coords = np.array([[0.0, 10.0], [0.0, 10.0]])
-        boxes = partition_points(coords, min_cap=1, max_cap=1,
-                                expand_to_inf=False, fraction_min_split=0.0)
-        assert len(boxes) == 2
+        partitioner = partition_points(coords, min_cap=1, max_cap=1, fraction_min_split=0.0)
+        assert partitioner.numPartitions() == 2
 
     def test_collinear_points(self):
         """Test partitioning collinear points."""
         coords = np.array([[float(i) for i in range(20)],
                           [0.0] * 20])
-        boxes = partition_points(coords, min_cap=2, max_cap=5,
-                                expand_to_inf=False, fraction_min_split=0.0)
-        assert len(boxes) >= 4
+        partitioner = partition_points(coords, min_cap=2, max_cap=5, fraction_min_split=0.0)
+        assert partitioner.numPartitions() >= 4

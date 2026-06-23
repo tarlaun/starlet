@@ -12,6 +12,16 @@ Adapt based on the real orchestrator API.
 """
 import pytest
 from pathlib import Path
+import numpy as np
+import pyarrow.parquet as pq
+
+from starlet._internal.tiling import (
+    GeoParquetSource,
+    RSGroveAssigner,
+    SortMode,
+    TwoStageOrchestrator,
+)
+from starlet._internal.tiling.RSGrove import EnvelopeNDLite
 
 
 class TestRoundOrchestrator:
@@ -88,6 +98,84 @@ class TestRoundOrchestrator:
         # )
         # orchestrator.run(input_file=str(sample_parquet_file))
         pass
+
+
+class TestTwoStageOrchestrator:
+    """Test the two-stage split assignment/write orchestrator."""
+
+    def test_two_stage_orchestrator_writes_all_rows(self, sample_parquet_file, sample_polygons, temp_dir):
+        source = GeoParquetSource(str(sample_parquet_file))
+        centers = np.array(
+            [[geom.centroid.x for geom in sample_polygons], [geom.centroid.y for geom in sample_polygons]],
+            dtype=np.float64,
+        )
+        bounds = np.array([geom.bounds for geom in sample_polygons], dtype=np.float64)
+        mbr = EnvelopeNDLite(
+            np.array([bounds[:, 0].min(), bounds[:, 1].min()], dtype=np.float64),
+            np.array([bounds[:, 2].max(), bounds[:, 3].max()], dtype=np.float64),
+        )
+        assigner = RSGroveAssigner.from_sample_and_mbr(
+            sample_points=centers,
+            mbr=mbr,
+            num_partitions=2,
+        )
+        outdir = temp_dir / "two_stage_tiles"
+
+        orchestrator = TwoStageOrchestrator(
+            source=source,
+            assigner=assigner,
+            outdir=str(outdir),
+            sort_mode=SortMode.NONE,
+            executor="thread",
+            assignment_workers=2,
+            write_workers=2,
+        )
+        orchestrator.run()
+
+        tile_files = list(outdir.glob("*.parquet"))
+        assert tile_files
+        total_rows = sum(pq.read_metadata(str(path)).num_rows for path in tile_files)
+        assert total_rows == len(sample_polygons)
+
+    def test_two_stage_orchestrator_uses_custom_temp_dir(self, sample_parquet_file, sample_polygons, temp_dir):
+        source = GeoParquetSource(str(sample_parquet_file))
+        centers = np.array(
+            [[geom.centroid.x for geom in sample_polygons], [geom.centroid.y for geom in sample_polygons]],
+            dtype=np.float64,
+        )
+        bounds = np.array([geom.bounds for geom in sample_polygons], dtype=np.float64)
+        mbr = EnvelopeNDLite(
+            np.array([bounds[:, 0].min(), bounds[:, 1].min()], dtype=np.float64),
+            np.array([bounds[:, 2].max(), bounds[:, 3].max()], dtype=np.float64),
+        )
+        assigner = RSGroveAssigner.from_sample_and_mbr(
+            sample_points=centers,
+            mbr=mbr,
+            num_partitions=2,
+        )
+        temp_parent = temp_dir / "large_tmp"
+
+        orchestrator = TwoStageOrchestrator(
+            source=source,
+            assigner=assigner,
+            outdir=str(temp_dir / "custom_tmp_tiles"),
+            sort_mode=SortMode.NONE,
+            executor="thread",
+            assignment_workers=2,
+            write_workers=2,
+            num_reducers=2,
+            temp_dir=str(temp_parent),
+            keep_temp=True,
+        )
+        orchestrator.run()
+
+        run_dirs = list(temp_parent.glob("starlet_two_stage_*"))
+        assert len(run_dirs) == 1
+        intermediate_files = list(run_dirs[0].glob("split_*/mapper_*_reducer_*.parquet"))
+        assert intermediate_files
+        for path in intermediate_files:
+            tile_ids = pq.read_table(str(path), columns=["_tile_id"])["_tile_id"].to_pylist()
+            assert tile_ids == sorted(tile_ids)
 
 
 class TestOrchestratorErrorHandling:
