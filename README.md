@@ -121,3 +121,20 @@ Then open http://localhost:8765 and select a dataset to visualize.
 
 - Python 3.10+
 - `make` (optional, for convenience targets)
+
+## Development
+
+### Running Tests
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+### Creating a Release
+
+See [RELEASE.md](RELEASE.md) for the complete release process, including:
+- Where to update version numbers
+- How to create and push release tags
+- Automated CI/CD workflow details
+- Troubleshooting guide

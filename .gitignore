@@ -52,3 +52,5 @@ bench_scratch/
 *.pdf
 *.log
 HANDOFF.md
+pyvenv.cfg
+.claude/worktrees/
