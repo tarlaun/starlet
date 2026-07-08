@@ -58,9 +58,17 @@ class MVTEncoder:
         width = (maxx - minx) or 1.0
         height = (maxy - miny) or 1.0
 
+        # Clip against a padded tile box (same 256/EXTENT rule as the batch
+        # renderer) so the artificial clip edge falls outside the visible
+        # tile. Clipping exactly at the boundary turns the tile border into
+        # feature geometry, which styles that stroke polygon outlines render
+        # as a phantom line along every tile seam.
+        pad = width * (256 / self.extent)
+        clip_poly = shapely.box(minx - pad, miny - pad, maxx + pad, maxy + pad)
+
         garr = np.array(geoms, dtype=object)
         garr = shapely.make_valid(garr)
-        garr = shapely.intersection(garr, self.tile_poly_3857)
+        garr = shapely.intersection(garr, clip_poly)
 
         simplify_tol = width * 0.0005
         garr = shapely.simplify(garr, simplify_tol, preserve_topology=True)
