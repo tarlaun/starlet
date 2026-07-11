@@ -35,7 +35,6 @@ _FEATURES_SEEN_PADDING = 0
 class _TileFeature:
     geometry: Any
     properties: dict[str, Any]
-    coordinate_count: int
 
 
 class IntermediateVectorTile:
@@ -75,15 +74,9 @@ class IntermediateVectorTile:
         )
 
         self._features: list[_TileFeature] = []
-        self._coordinate_count = 0
         self._features_seen = 0
         self._small_geometry_area = 30.0
 
-    @property
-    def coordinate_count(self) -> int:
-        """Number of raw geometry coordinates currently retained by this tile."""
-        return self._coordinate_count
-    
     @property
     def tile_id(self) -> int:
         """Unique tile ID for this z/x/y."""
@@ -115,10 +108,6 @@ class IntermediateVectorTile:
                 # The new feature is not selected for retention, so skip it.
                 return False
 
-        coordinate_count = shapely.count_coordinates(geometry)
-        if coordinate_count == 0:
-            return False
-
         clean_properties = {
             key: value
             for key, value in (properties or {}).items()
@@ -128,15 +117,12 @@ class IntermediateVectorTile:
         feature = _TileFeature(
             geometry=geometry,
             properties=clean_properties,
-            coordinate_count=coordinate_count,
         )
         if slot == len(self._features):
             self._features.append(feature)
         else:
             # Remove the feature in the slot to replace
-            self._coordinate_count -= self._features[slot].coordinate_count
             self._features[slot] = feature
-        self._coordinate_count += coordinate_count
         return True
 
     def simplify_geometry(self, geometry: Any) -> list[Any]:
@@ -181,7 +167,6 @@ class IntermediateVectorTile:
 
         if total_seen <= self.feature_capacity:
             self._features.extend(other._features)
-            self._coordinate_count += other._coordinate_count
             self._features_seen = total_seen
             return
 
@@ -222,7 +207,6 @@ class IntermediateVectorTile:
         other_sample = _sample_without_replacement(other._features, other_count)
 
         self._features = self_sample + other_sample
-        self._coordinate_count = sum(feature.coordinate_count for feature in self._features)
         self._features_seen = total_seen
 
     def write_features(self, path) -> None:
@@ -262,17 +246,12 @@ class IntermediateVectorTile:
         properties = table["properties"].to_pylist()
         for geometry_bytes, property_json in zip(geometries, properties):
             geometry = shapely.from_wkb(geometry_bytes)
-            coordinate_count = shapely.count_coordinates(geometry)
-            if coordinate_count == 0:
-                continue
             self._features.append(
                 _TileFeature(
                     geometry=geometry,
                     properties=json.loads(property_json),
-                    coordinate_count=coordinate_count,
                 )
             )
-            self._coordinate_count += coordinate_count
 
     def encode(self, layer_name: str = "layer0") -> bytes:
         """Encode the retained features as an MVT binary payload."""

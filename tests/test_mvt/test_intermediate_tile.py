@@ -63,12 +63,11 @@ def test_simplify_geometry_clips_containing_polygon_to_tile_ring():
     assert transformed[0].bounds == (-256.0, -256.0, 4352.0, 4352.0)
 
 
-def test_add_feature_filters_null_properties_and_tracks_coordinates():
+def test_add_feature_filters_null_properties():
     tile = IntermediateVectorTile(0, 0, 0, feature_capacity=10)
 
     assert tile.add_feature(Point(0, 0), {"id": 1, "name": None})
 
-    assert tile.coordinate_count == 1
     assert tile.feature_count == 1
     assert tile._features[0].properties == {"id": 1}
 
@@ -124,7 +123,8 @@ def test_feature_capacity_replaces_random_features_to_make_room():
 
     retained_ids = {feature.properties["id"] for feature in tile._features}
     assert retained_ids == {2, 3}
-    assert tile.coordinate_count == 2
+    assert tile.feature_count == 2
+    assert tile._features_seen == 3
 
 
 def test_merge_combines_same_tile_without_simplifying_again():
@@ -150,7 +150,8 @@ def test_merge_combines_same_tile_without_simplifying_again():
     left.add_feature = original_add_feature
     retained_ids = {feature.properties["id"] for feature in left._features}
     assert retained_ids == {2, 3}
-    assert left.coordinate_count == 2
+    assert left.feature_count == 2
+    assert left._features_seen == 3
 
 
 def test_merge_rejects_different_tile_ids():
@@ -192,6 +193,5 @@ def test_feature_arrow_roundtrip_populates_tile_state(tmp_path):
     loaded.load_features(path)
 
     assert loaded.feature_count == 1
-    assert loaded.coordinate_count == 1
     assert loaded._features_seen == 2
     assert loaded._features[0].properties == {"id": 1}
