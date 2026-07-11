@@ -201,7 +201,7 @@ def test_vector_tiler_only_caches_generated_tiles(temp_dir, monkeypatch):
 
     generated_bytes = b"generated-tile"
 
-    def fake_generate_single_mvt_tile(dataset_root, tile_coords):
+    def fake_generate_single_mvt_tile(dataset_root, tile_coords, **kwargs):
         return generated_bytes
 
     monkeypatch.setattr(

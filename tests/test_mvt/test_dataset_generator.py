@@ -16,10 +16,13 @@ from starlet._internal.mvt.mvt_generator import (
     _group_table_batches,
     _positive_bounds_tuple,
     _property_value,
+    _sample_single_tile_records,
     _single_tile_index_cache,
     _single_tile_parquet_index,
     generate_single_mvt_tile,
 )
+from starlet._internal.mvt import mvt_generator
+from starlet._internal.server.tiler.parquet_index import ParquetIndex
 from starlet._internal.tiling.geoparquet_source import GeoParquetSplit
 
 
@@ -146,6 +149,54 @@ def test_generate_single_mvt_tile_queries_buffered_tile_bounds(tmp_path):
     features = decoded["layer0"]["features"]
     assert len(features) == 1
     assert features[0]["properties"] == {"id": 9}
+
+
+def test_single_tile_sampling_decodes_only_retained_rows(monkeypatch, tmp_path):
+    parquet_dir = tmp_path / "dataset" / "parquet_tiles"
+    parquet_dir.mkdir(parents=True)
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "crs": "EPSG:4326"}},
+    }
+    rows = list(range(10))
+    table = pa.table(
+        {
+            "geometry": [wkb.dumps(Point(float(index), float(index))) for index in rows],
+            "id": rows,
+            "_bbox_xmin": [float(index) for index in rows],
+            "_bbox_ymin": [float(index) for index in rows],
+            "_bbox_xmax": [float(index) for index in rows],
+            "_bbox_ymax": [float(index) for index in rows],
+        }
+    ).replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")})
+    pq.write_table(
+        table,
+        parquet_dir / "tile_000000__0_0_0_0_9_0_9_0.parquet",
+    )
+    decoded_batch_sizes = []
+
+    def fake_from_wkb(values):
+        decoded_batch_sizes.append(len(values))
+        return [Point(0, 0) for _ in values]
+
+    monkeypatch.setattr(mvt_generator, "from_wkb", fake_from_wkb)
+    monkeypatch.setattr(
+        mvt_generator,
+        "reproject_geometries",
+        lambda geometries, source_crs, target_crs: (geometries, target_crs),
+    )
+
+    features = _sample_single_tile_records(
+        ParquetIndex(parquet_dir),
+        (0.0, 0.0, 9.0, 9.0),
+        3,
+        seed=1,
+    )
+
+    assert features is not None
+    assert len(features) == 3
+    assert decoded_batch_sizes == [3]
 
 
 def test_single_tile_parquet_index_is_cached_by_path(tmp_path):

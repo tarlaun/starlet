@@ -16,6 +16,8 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 import shapely
 from shapely import from_wkb
 
@@ -32,7 +34,7 @@ from starlet._internal.mvt.intermediate_tile import IntermediateVectorTile
 from starlet._internal.mvt.pyramid_partitioner import PyramidPartitioner
 from starlet._internal.pmtiles.paths import default_pmtiles_path
 from starlet._internal.pmtiles.exporter import export_to_pmtiles
-from starlet._internal.server.tiler.parquet_index import ParquetIndex
+from starlet._internal.server.tiler.parquet_index import INTERNAL_COLS, ParquetIndex
 from starlet._internal.tiling.crs import WEB_MERCATOR_CRS, WGS84_CRS, geoparquet_crs, reproject_geometries
 from starlet._internal.tiling.geoparquet_source import GeoParquetSource, GeoParquetSplit
 
@@ -386,6 +388,21 @@ def generate_single_mvt_tile(
     query_bounds = _expand_tile_bounds_for_buffer(tile_bounds, extent, buffer)
     index = _single_tile_parquet_index(parquet_dir)
     query_bounds_4326 = index._transform_bbox(query_bounds, WEB_MERCATOR_CRS, WGS84_CRS)
+
+    sampled_features = _sample_single_tile_records(
+        index,
+        query_bounds_4326,
+        feature_capacity,
+        seed=_single_tile_sample_seed(int(z), int(x), int(y)),
+    )
+    if sampled_features is None:
+        sampled_features = _sample_single_tile_records_legacy(
+            index,
+            query_bounds_4326,
+            feature_capacity,
+            seed=_single_tile_sample_seed(int(z), int(x), int(y)),
+        )
+
     tile = IntermediateVectorTile(
         int(z),
         int(x),
@@ -394,6 +411,63 @@ def generate_single_mvt_tile(
         extent=extent,
         buffer=buffer,
     )
+
+    for geom, attrs in sampled_features:
+        tile.add_feature(geom, attrs)
+
+    return tile.encode(layer_name=layer_name)
+
+
+def _sample_single_tile_records(
+    index: ParquetIndex,
+    query_bounds_4326: tuple[float, float, float, float],
+    feature_capacity: int,
+    *,
+    seed: int,
+) -> list[tuple[Any, dict[str, Any]]] | None:
+    """Reservoir-sample raw parquet rows before WKB parsing/reprojection.
+
+    Returns ``None`` when any candidate partition lacks row bbox columns; those
+    legacy datasets need the older geometry-based path for correctness.
+    """
+    feature_capacity = max(1, int(feature_capacity))
+    rng = random.Random(seed)
+    samples: list[tuple[bytes, dict[str, Any], Any]] = []
+    rows_seen = 0
+
+    for path in index.find_intersecting_files(query_bounds_4326):
+        names, geom_col, has_bbox, crs = index._schema_info(path)
+        if not has_bbox:
+            return None
+
+        bbox_native = index._transform_bbox(query_bounds_4326, WGS84_CRS, crs)
+        table = _read_bbox_filtered_table(path, bbox_native)
+        if table.num_rows == 0:
+            continue
+        for geometry_wkb, attrs in _iter_raw_feature_rows(table, geom_col):
+            rows_seen += 1
+            if len(samples) < feature_capacity:
+                samples.append((geometry_wkb, attrs, crs))
+                continue
+            slot = rng.randrange(rows_seen)
+            if slot < feature_capacity:
+                samples[slot] = (geometry_wkb, attrs, crs)
+
+    return _decode_sampled_features(samples)
+
+
+def _sample_single_tile_records_legacy(
+    index: ParquetIndex,
+    query_bounds_4326: tuple[float, float, float, float],
+    feature_capacity: int,
+    *,
+    seed: int,
+) -> list[tuple[Any, dict[str, Any]]]:
+    """Reservoir-sample after exact legacy geometry filtering."""
+    feature_capacity = max(1, int(feature_capacity))
+    rng = random.Random(seed)
+    samples: list[tuple[Any, dict[str, Any]]] = []
+    rows_seen = 0
 
     for gdf in index.iter_query_batches(query_bounds_4326, target_crs=WEB_MERCATOR_CRS):
         for _, row in gdf.iterrows():
@@ -405,12 +479,68 @@ def generate_single_mvt_tile(
                 for column, value in row.items()
                 if column != "geometry" and value is not None
             }
-            tile.add_feature(
-                geom,
-                attrs,
-            )
+            rows_seen += 1
+            if len(samples) < feature_capacity:
+                samples.append((geom, attrs))
+                continue
+            slot = rng.randrange(rows_seen)
+            if slot < feature_capacity:
+                samples[slot] = (geom, attrs)
+    return samples
 
-    return tile.encode(layer_name=layer_name)
+
+def _read_bbox_filtered_table(path: Path, bbox_native: tuple[float, float, float, float]) -> pa.Table:
+    minx, miny, maxx, maxy = bbox_native
+    flt = (
+        (pc.field("_bbox_xmax") >= minx)
+        & (pc.field("_bbox_xmin") <= maxx)
+        & (pc.field("_bbox_ymax") >= miny)
+        & (pc.field("_bbox_ymin") <= maxy)
+    )
+    return pq.read_table(path, filters=flt)
+
+
+def _iter_raw_feature_rows(table: pa.Table, geom_col: str) -> Iterable[tuple[bytes, dict[str, Any]]]:
+    attr_columns = [
+        column
+        for column in table.column_names
+        if column != geom_col and column not in INTERNAL_COLS
+    ]
+    geometry_values = table[geom_col].to_pylist()
+    attrs_by_column = {column: table[column].to_pylist() for column in attr_columns}
+
+    for index, geometry_wkb in enumerate(geometry_values):
+        if geometry_wkb is None:
+            continue
+        attrs = {
+            column: _property_value(values[index])
+            for column, values in attrs_by_column.items()
+            if values[index] is not None
+        }
+        yield geometry_wkb, attrs
+
+
+def _decode_sampled_features(
+    samples: Sequence[tuple[bytes, dict[str, Any], Any]],
+) -> list[tuple[Any, dict[str, Any]]]:
+    decoded: list[tuple[Any, dict[str, Any]]] = []
+    by_crs: dict[str, list[tuple[bytes, dict[str, Any], Any]]] = defaultdict(list)
+    for geometry_wkb, attrs, crs in samples:
+        by_crs[str(crs)].append((geometry_wkb, attrs, crs))
+
+    for group in by_crs.values():
+        geometries = from_wkb([geometry_wkb for geometry_wkb, _, _ in group])
+        geometries = shapely.make_valid(geometries)
+        crs = group[0][2]
+        geometries, _ = reproject_geometries(geometries, crs, WEB_MERCATOR_CRS)
+        for geom, (_, attrs, _) in zip(geometries, group):
+            if geom is not None and not geom.is_empty:
+                decoded.append((geom, attrs))
+    return decoded
+
+
+def _single_tile_sample_seed(z: int, x: int, y: int) -> int:
+    return int(PyramidPartitioner.encode_tile_id(z, x, y))
 
 
 def _expand_tile_bounds_for_buffer(

@@ -4,6 +4,7 @@ from time import perf_counter
 from typing import Any, MutableMapping
 import gzip
 
+from starlet._internal.config import config_value
 from starlet._internal.pmtiles.paths import discover_pmtiles_path
 
 from .tile_cache import TileCache
@@ -109,10 +110,16 @@ class VectorTiler:
         from starlet._internal.mvt.mvt_generator import generate_single_mvt_tile
 
         t0 = perf_counter()
-        tile_bytes = generate_single_mvt_tile(str(self.dataset_root), (z, x, y))
+        feature_capacity = int(config_value("mvt", "feature_capacity", 10_000) or 10_000)
+        tile_bytes = generate_single_mvt_tile(
+            str(self.dataset_root),
+            (z, x, y),
+            feature_capacity=feature_capacity,
+        )
         _update_output(
             output,
             generation="generated",
+            feature_capacity=feature_capacity,
             elapsed_ms=(perf_counter() - t0) * 1000,
         )
 
