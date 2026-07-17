@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
+import heapq
 import logging
 import math
 import multiprocessing
@@ -30,7 +31,7 @@ from starlet._internal.mvt.helpers import (
     WORLD_MINY,
     mercator_tile_bounds,
 )
-from starlet._internal.mvt.intermediate_tile import IntermediateVectorTile
+from starlet._internal.mvt.intermediate_tile import IntermediateVectorTile, feature_priority
 from starlet._internal.mvt.pyramid_partitioner import PyramidPartitioner
 from starlet._internal.pmtiles.paths import default_pmtiles_path
 from starlet._internal.pmtiles.exporter import export_to_pmtiles
@@ -271,7 +272,7 @@ def _map_split_group(
     tiles: dict[int, IntermediateVectorTile] = {}
 
     for table in _iter_map_input_tables(source, inputs):
-        for geom, attrs in _iter_web_mercator_features(table, source.geom_col):
+        for geom, attrs, priority in _iter_web_mercator_features(table, source.geom_col):
             bounds = _positive_bounds_tuple(geom.bounds)
             tile_ids = partitioner.overlapping_tile_ids(bounds)
             if not tile_ids:
@@ -287,12 +288,12 @@ def _map_split_group(
                         feature_capacity=feature_capacity,
                         extent=extent,
                         buffer=buffer,
-                        rng=random.Random(seed + tile_id),
                     )
                     tiles[tile_id] = tile
                 tile.add_feature(
                     geom,
                     attrs,
+                    priority=priority,
                 )
     intermediate_dir = Path(temp_root) / f"mapper-{mapper_index:06d}"
     intermediate_dir.mkdir(parents=True, exist_ok=True)
@@ -400,14 +401,12 @@ def generate_single_mvt_tile(
         index,
         query_bounds_4326,
         feature_capacity,
-        seed=_single_tile_sample_seed(int(z), int(x), int(y)),
     )
     if sampled_features is None:
         sampled_features = _sample_single_tile_records_legacy(
             index,
             query_bounds_4326,
             feature_capacity,
-            seed=_single_tile_sample_seed(int(z), int(x), int(y)),
         )
 
     tile = IntermediateVectorTile(
@@ -419,8 +418,8 @@ def generate_single_mvt_tile(
         buffer=buffer,
     )
 
-    for geom, attrs in sampled_features:
-        tile.add_feature(geom, attrs)
+    for geom, attrs, priority in sampled_features:
+        tile.add_feature(geom, attrs, priority=priority)
 
     return tile.encode(layer_name=layer_name)
 
@@ -429,18 +428,22 @@ def _sample_single_tile_records(
     index: ParquetIndex,
     query_bounds_4326: tuple[float, float, float, float],
     feature_capacity: int,
-    *,
-    seed: int,
-) -> list[tuple[Any, dict[str, Any]]] | None:
-    """Reservoir-sample raw parquet rows before WKB parsing/reprojection.
+) -> list[tuple[Any, dict[str, Any], int]] | None:
+    """Top-k sample raw parquet rows by priority before WKB parsing.
 
-    Returns ``None`` when any candidate partition lacks row bbox columns; those
-    legacy datasets need the older geometry-based path for correctness.
+    Rows are ranked by :func:`feature_priority` of their raw WKB bytes — the
+    same geometry-intrinsic priority the batch pipeline uses — so adjacent
+    on-demand tiles (and pre-generated tiles) make consistent keep/drop
+    decisions for a geometry they share. Attribute dicts are only built for
+    the winners, after sampling.
+
+    Returns ``None`` when any candidate partition lacks row bbox columns;
+    those legacy datasets need the older geometry-based path for correctness.
     """
     feature_capacity = max(1, int(feature_capacity))
-    rng = random.Random(seed)
-    samples: list[tuple[bytes, dict[str, Any], Any]] = []
-    rows_seen = 0
+    # Min-heap of (priority, seq, wkb, crs, table, geom_col, row_idx).
+    heap: list[tuple[int, int, bytes, Any, pa.Table, str, int]] = []
+    seq = 0
 
     for path in index.find_intersecting_files(query_bounds_4326):
         names, geom_col, has_bbox, crs = index._schema_info(path)
@@ -451,49 +454,85 @@ def _sample_single_tile_records(
         table = _read_bbox_filtered_table(path, bbox_native)
         if table.num_rows == 0:
             continue
-        for geometry_wkb, attrs in _iter_raw_feature_rows(table, geom_col):
-            rows_seen += 1
-            if len(samples) < feature_capacity:
-                samples.append((geometry_wkb, attrs, crs))
+        for row_idx, geometry_wkb in enumerate(table[geom_col].to_pylist()):
+            if geometry_wkb is None:
                 continue
-            slot = rng.randrange(rows_seen)
-            if slot < feature_capacity:
-                samples[slot] = (geometry_wkb, attrs, crs)
+            priority = feature_priority(geometry_wkb)
+            if len(heap) >= feature_capacity and priority <= heap[0][0]:
+                continue
+            entry = (priority, seq, geometry_wkb, crs, table, geom_col, row_idx)
+            seq += 1
+            if len(heap) < feature_capacity:
+                heapq.heappush(heap, entry)
+            else:
+                heapq.heapreplace(heap, entry)
 
+    samples = [
+        (geometry_wkb, _row_attrs(table, geom_col, row_idx), crs, priority)
+        for (priority, _, geometry_wkb, crs, table, geom_col, row_idx) in heap
+    ]
     return _decode_sampled_features(samples)
+
+
+def _row_attrs(table: pa.Table, geom_col: str, row_idx: int) -> dict[str, Any]:
+    """Attribute dict for a single sampled row (winners only)."""
+    attrs: dict[str, Any] = {}
+    for column in table.column_names:
+        if column == geom_col or column in INTERNAL_COLS:
+            continue
+        value = table[column][row_idx].as_py()
+        if value is not None:
+            attrs[column] = _property_value(value)
+    return attrs
 
 
 def _sample_single_tile_records_legacy(
     index: ParquetIndex,
     query_bounds_4326: tuple[float, float, float, float],
     feature_capacity: int,
-    *,
-    seed: int,
-) -> list[tuple[Any, dict[str, Any]]]:
-    """Reservoir-sample after exact legacy geometry filtering."""
+) -> list[tuple[Any, dict[str, Any], int]]:
+    """Top-k sample after exact legacy geometry filtering (no bbox columns).
+
+    Priorities come from the WKB of the (already reprojected) geometries —
+    still deterministic per geometry, so tiles over a legacy dataset stay
+    mutually consistent. Attribute dicts are built only for winners.
+    """
     feature_capacity = max(1, int(feature_capacity))
-    rng = random.Random(seed)
-    samples: list[tuple[Any, dict[str, Any]]] = []
-    rows_seen = 0
+    # Min-heap of (priority, seq, geom, col_arrays, row_idx).
+    heap: list[tuple[int, int, Any, dict[str, Any], int]] = []
+    seq = 0
 
     for gdf in index.iter_query_batches(query_bounds_4326, target_crs=WEB_MERCATOR_CRS):
-        for _, row in gdf.iterrows():
-            geom = row.geometry
+        col_arrays = {
+            column: gdf[column].to_numpy()
+            for column in gdf.columns
+            if column != "geometry" and column not in INTERNAL_COLS
+        }
+        for row_idx, geom in enumerate(gdf.geometry.values):
             if geom is None or geom.is_empty:
                 continue
-            attrs = {
-                column: _property_value(value)
-                for column, value in row.items()
-                if column != "geometry" and value is not None
-            }
-            rows_seen += 1
-            if len(samples) < feature_capacity:
-                samples.append((geom, attrs))
+            priority = feature_priority(shapely.to_wkb(geom))
+            if len(heap) >= feature_capacity and priority <= heap[0][0]:
                 continue
-            slot = rng.randrange(rows_seen)
-            if slot < feature_capacity:
-                samples[slot] = (geom, attrs)
-    return samples
+            entry = (priority, seq, geom, col_arrays, row_idx)
+            seq += 1
+            if len(heap) < feature_capacity:
+                heapq.heappush(heap, entry)
+            else:
+                heapq.heapreplace(heap, entry)
+
+    return [
+        (
+            geom,
+            {
+                column: _property_value(values[row_idx])
+                for column, values in col_arrays.items()
+                if values[row_idx] is not None
+            },
+            priority,
+        )
+        for (priority, _, geom, col_arrays, row_idx) in heap
+    ]
 
 
 def _read_bbox_filtered_table(path: Path, bbox_native: tuple[float, float, float, float]) -> pa.Table:
@@ -507,47 +546,23 @@ def _read_bbox_filtered_table(path: Path, bbox_native: tuple[float, float, float
     return pq.read_table(path, filters=flt)
 
 
-def _iter_raw_feature_rows(table: pa.Table, geom_col: str) -> Iterable[tuple[bytes, dict[str, Any]]]:
-    attr_columns = [
-        column
-        for column in table.column_names
-        if column != geom_col and column not in INTERNAL_COLS
-    ]
-    geometry_values = table[geom_col].to_pylist()
-    attrs_by_column = {column: table[column].to_pylist() for column in attr_columns}
-
-    for index, geometry_wkb in enumerate(geometry_values):
-        if geometry_wkb is None:
-            continue
-        attrs = {
-            column: _property_value(values[index])
-            for column, values in attrs_by_column.items()
-            if values[index] is not None
-        }
-        yield geometry_wkb, attrs
-
-
 def _decode_sampled_features(
-    samples: Sequence[tuple[bytes, dict[str, Any], Any]],
-) -> list[tuple[Any, dict[str, Any]]]:
-    decoded: list[tuple[Any, dict[str, Any]]] = []
-    by_crs: dict[str, list[tuple[bytes, dict[str, Any], Any]]] = defaultdict(list)
-    for geometry_wkb, attrs, crs in samples:
-        by_crs[str(crs)].append((geometry_wkb, attrs, crs))
+    samples: Sequence[tuple[bytes, dict[str, Any], Any, int]],
+) -> list[tuple[Any, dict[str, Any], int]]:
+    decoded: list[tuple[Any, dict[str, Any], int]] = []
+    by_crs: dict[str, list[tuple[bytes, dict[str, Any], Any, int]]] = defaultdict(list)
+    for geometry_wkb, attrs, crs, priority in samples:
+        by_crs[str(crs)].append((geometry_wkb, attrs, crs, priority))
 
     for group in by_crs.values():
-        geometries = from_wkb([geometry_wkb for geometry_wkb, _, _ in group])
+        geometries = from_wkb([geometry_wkb for geometry_wkb, _, _, _ in group])
         geometries = shapely.make_valid(geometries)
         crs = group[0][2]
         geometries, _ = reproject_geometries(geometries, crs, WEB_MERCATOR_CRS)
-        for geom, (_, attrs, _) in zip(geometries, group):
+        for geom, (_, attrs, _, priority) in zip(geometries, group):
             if geom is not None and not geom.is_empty:
-                decoded.append((geom, attrs))
+                decoded.append((geom, attrs, priority))
     return decoded
-
-
-def _single_tile_sample_seed(z: int, x: int, y: int) -> int:
-    return int(PyramidPartitioner.encode_tile_id(z, x, y))
 
 
 def _expand_tile_bounds_for_buffer(
@@ -586,9 +601,10 @@ def _single_tile_parquet_index(parquet_dir: Path) -> ParquetIndex:
     return index
 
 
-def _iter_web_mercator_features(table: Any, geom_col: str) -> Iterable[tuple[Any, dict[str, Any]]]:
+def _iter_web_mercator_features(table: Any, geom_col: str) -> Iterable[tuple[Any, dict[str, Any], int]]:
     source_crs = geoparquet_crs(table.schema, geom_col) or WGS84_CRS
-    geometries = from_wkb(table[geom_col].to_numpy(zero_copy_only=False))
+    raw_wkb = table[geom_col].to_numpy(zero_copy_only=False)
+    geometries = from_wkb(raw_wkb)
     geometries = shapely.make_valid(geometries)
     geometries, _ = reproject_geometries(geometries, source_crs, WEB_MERCATOR_CRS)
 
@@ -607,7 +623,10 @@ def _iter_web_mercator_features(table: Any, geom_col: str) -> Iterable[tuple[Any
             for column, values in attrs_by_column.items()
             if values[index] is not None
         }
-        yield geom, attrs
+        # Priority from the *source* WKB bytes: identical for this feature in
+        # every tile/zoom it touches (and in the on-demand serving sampler),
+        # which is what makes sampling seam-consistent.
+        yield geom, attrs, feature_priority(raw_wkb[index])
 
 
 def _positive_bounds_tuple(bounds: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
@@ -635,10 +654,33 @@ def _group_splits(splits: Sequence[GeoParquetSplit], num_groups: int) -> list[li
     return groups
 
 
+_MAP_FALLBACK_MAX_BYTES = 512 * 1024 * 1024
+
+
 def _create_map_groups(source: GeoParquetSource, num_groups: int) -> list[list[_MapInput]]:
     splits = source.create_splits()
     if len(splits) >= max(1, int(num_groups)):
         return _group_splits(splits, num_groups)
+
+    # The repartitioning fallback below materialises the whole dataset in the
+    # driver process; only take it for small inputs. Large datasets with few
+    # row groups simply run with fewer map workers.
+    try:
+        input_bytes = int(source.input_size_bytes())
+    except Exception:
+        input_bytes = None
+    if input_bytes is not None and input_bytes > _MAP_FALLBACK_MAX_BYTES:
+        logger.info(
+            "DatasetMVTGenerator: %d row-group splits for %d workers but input "
+            "is %d bytes (> %d); running with %d map workers instead of "
+            "loading the dataset into memory to repartition",
+            len(splits),
+            max(1, int(num_groups)),
+            input_bytes,
+            _MAP_FALLBACK_MAX_BYTES,
+            len(splits),
+        )
+        return _group_splits(splits, len(splits))
 
     tables = [table for split in splits for table in source.iter_tables(split)]
     if not tables:

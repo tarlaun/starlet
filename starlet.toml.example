@@ -51,7 +51,7 @@ sfc_bits = 16
 zoom = 7
 
 # Minimum feature count required for a tile to be generated.
-threshold = 100000
+threshold = 0
 
 # Export a PMTiles archive after generating tiles.
 pmtiles = false

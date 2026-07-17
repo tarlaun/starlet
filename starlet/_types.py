@@ -7,12 +7,11 @@ import dataclasses
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import numpy as np
-import pyarrow.parquet as pq
-
 from starlet._internal.pmtiles.paths import discover_pmtiles_path
-from starlet._internal.server.tiler.parquet_index import BBOX_COLS
-from starlet._internal.tiling.crs import geoparquet_crs
+
+# numpy / pyarrow / geopandas-adjacent imports are deliberately deferred to
+# the methods that need them: `import starlet` must stay cheap (repo
+# convention) and must not drag the geo stack in for CLI --help.
 
 
 @dataclasses.dataclass(frozen=True)
@@ -27,11 +26,16 @@ class TileResult:
 
 @dataclasses.dataclass(frozen=True)
 class MVTResult:
-    """Result returned by :func:`starlet.generate_mvt`."""
+    """Result returned by :func:`starlet.generate_mvt`.
+
+    New fields are appended after the 0.3.x fields (with defaults) so
+    positional construction of the historical ``(outdir, zoom_levels,
+    tile_count)`` prefix keeps working.
+    """
     outdir: str
     zoom_levels: List[int]
-    tile_counts_by_zoom: List[int]
     tile_count: int
+    tile_counts_by_zoom: List[int] = dataclasses.field(default_factory=list)
     pmtiles_path: Optional[str] = None
 
 
@@ -146,6 +150,8 @@ class Dataset:
                 except Exception:
                     pass
 
+        import numpy as np
+
         for array_path in (hist_dir / "global_prefix.npy", hist_dir / "global.npy"):
             if array_path.exists():
                 try:
@@ -201,6 +207,11 @@ class Dataset:
     def _get_parquet_info(self) -> tuple[bool, str | None]:
         if self._parquet_info is not None:
             return self._parquet_info
+
+        import pyarrow.parquet as pq
+
+        from starlet._internal.server.tiler.parquet_index import BBOX_COLS
+        from starlet._internal.tiling.crs import geoparquet_crs
 
         tiles_dir = self._root / "parquet_tiles"
         parquet_files = sorted(tiles_dir.glob("*.parquet"))

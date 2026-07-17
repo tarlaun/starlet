@@ -226,7 +226,6 @@ def test_single_tile_sampling_decodes_only_retained_rows(monkeypatch, tmp_path):
         ParquetIndex(parquet_dir),
         (0.0, 0.0, 9.0, 9.0),
         3,
-        seed=1,
     )
 
     assert features is not None

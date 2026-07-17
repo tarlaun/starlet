@@ -29,7 +29,7 @@ def run_benchmark(input_path, format_name, output_dir):
     logger.info(f"Starting {format_name.upper()} benchmark")
     logger.info(f"Input: {input_path}")
     logger.info(f"Output: {output_dir}")
-    logger.info(f"Detected CPUs: {cpu_count}, setting max_parallel_files={max_parallel}")
+    logger.info(f"Detected CPUs: {cpu_count}, setting parallelism={max_parallel}")
     logger.info(f"=" * 80)
 
     start = time.time()
@@ -43,7 +43,7 @@ def run_benchmark(input_path, format_name, output_dir):
         partition_size=100 * 1024 * 1024,
         zoom=5,
         threshold=50000,
-        max_parallel_files=max_parallel
+        parallelism=max_parallel
     )
 
     elapsed = time.time() - start

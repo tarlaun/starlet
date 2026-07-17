@@ -5,8 +5,12 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 import threading
-import tomllib
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -28,7 +32,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "mvt": {
         "zoom": 7,
-        "threshold": 100_000,
+        "threshold": 0,
         "pmtiles": False,
         "feature_capacity": 10_000,
         "extent": 4096,
@@ -124,14 +128,29 @@ def set_loaded_config(config: dict[str, Any], path: str | Path | None = None) ->
 
 
 def ensure_config_loaded(path: str | Path | None = None) -> None:
-    """Load process-wide config once, if it has not already been installed."""
+    """Load process-wide config once, if it has not already been installed.
+
+    A malformed config file in the working directory must not make
+    ``import starlet`` unusable, so parse errors fall back to defaults
+    with a warning instead of propagating.
+    """
     if _loaded_config_initialized:
         return
     with _loaded_config_lock:
         if _loaded_config_initialized:
             return
         resolved_path = _resolve_config_path(path)
-        set_loaded_config(load_config(resolved_path), resolved_path)
+        try:
+            set_loaded_config(load_config(resolved_path), resolved_path)
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Failed to load Starlet config from %s (%s); using defaults",
+                resolved_path,
+                exc,
+            )
+            set_loaded_config(default_config(), None)
 
 
 def get_loaded_config() -> dict[str, Any]:

@@ -1,6 +1,6 @@
 [project]
 name = "starlet"
-version = "0.3.2"
+version = "0.4.0"
 description = "Spatial tiling, MVT generation, and tile serving for geospatial data"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,6 +21,7 @@ dependencies = [
     "gunicorn",
     "datasketch",
     "pmtiles>=3.7",
+    'tomli>=1.2.2; python_version < "3.11"',
 ]
 
 [project.scripts]

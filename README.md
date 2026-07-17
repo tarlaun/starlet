@@ -60,7 +60,7 @@ starlet build --input data.parquet --outdir datasets/mydata --zoom 8
 | `--outdir` | (required) | Output dataset directory |
 | `--zoom` | 7 | Maximum MVT zoom level |
 | `--partition-size` | 512mb (GeoJSON) / 128mb (GeoParquet) | Target partition size, e.g. `256mb`, `1gb` |
-| `--threshold` | 100000 | Minimum feature count per MVT tile |
+| `--threshold` | 0 | Minimum feature count per MVT tile |
 | `--pmtiles` | off | Also export a single `.pmtiles` archive |
 | `--covering-bbox` | on | Write per-row bbox columns for faster on-demand serving |
 
@@ -84,7 +84,7 @@ starlet tile --input data.parquet --outdir datasets/mydata
 ### `starlet mvt` — generate vector tiles from a tiled dataset
 
 ```bash
-starlet mvt --dir datasets/mydata --zoom 7 --threshold 100000
+starlet mvt --dir datasets/mydata --zoom 7 --threshold 100000  # threshold optional; default 0
 ```
 
 | Flag | Default | Description |

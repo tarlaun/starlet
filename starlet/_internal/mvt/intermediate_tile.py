@@ -1,16 +1,29 @@
-"""Standalone intermediate vector tile helper.
+"""Intermediate vector tile used by the map/reduce MVT pipeline.
 
-This module intentionally does not participate in the current MVT generation
-pipeline. It provides a small in-memory tile object that can collect Web
-Mercator geometries, reservoir-sample them by feature count, merge with another
-intermediate tile, and simplify the retained features into tile pixel
+Provides a small tile object that collects Web Mercator geometries,
+retains a bounded uniform sample of them, merges with partial tiles from
+other mappers, and simplifies the retained features into tile pixel
 coordinates only when encoding MVT bytes.
+
+Sampling is **priority-based top-k** rather than an independent random
+reservoir: every feature carries a priority (by default ``crc32`` of its
+WKB — geometry-intrinsic and deterministic; the batch pipeline passes the
+crc32 of the *source* WKB bytes computed before decode), and each tile
+keeps the ``feature_capacity`` features with the highest priority. Because
+the same geometry has the same priority in every tile (and zoom level) it
+touches, adjacent tiles make consistent keep/drop decisions — no seam
+popping — and merging partial tiles from different mappers is a
+deterministic top-k union instead of a statistical resample. Hash
+priorities are uniformly distributed, so the retained set is still a
+uniform sample of everything seen.
 """
 from __future__ import annotations
 
+import heapq
 import json
 import random
 import struct
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +42,17 @@ from .helpers import EXTENT, explode_geom, mercator_tile_bounds
 DEFAULT_FEATURE_CAPACITY = 2_000
 _FEATURES_SEEN_HEADER = struct.Struct("<Q")
 _FEATURES_SEEN_PADDING = 0
+
+# Features whose transformed bbox fits inside this many tile pixels in BOTH
+# dimensions collapse to their centroid Point (sub-pixel clutter). Judged
+# per-dimension, not by bbox area: a long straight line has bbox area 0 but
+# must keep its type.
+_SMALL_GEOMETRY_EXTENT_PX = 5.5
+
+
+def feature_priority(wkb_bytes: bytes) -> int:
+    """Deterministic, geometry-intrinsic sampling priority for a feature."""
+    return zlib.crc32(wkb_bytes)
 
 
 @dataclass(frozen=True)
@@ -57,6 +81,8 @@ class IntermediateVectorTile:
         self.feature_capacity = max(1, int(feature_capacity))
         self.extent = int(extent)
         self.buffer = int(buffer)
+        # Accepted for backward compatibility; sampling is deterministic
+        # (priority top-k) and no longer draws from an RNG.
         self.rng = rng or random.Random()
 
         minx, miny, maxx, maxy = mercator_tile_bounds(self.z, self.x, self.y)
@@ -73,9 +99,12 @@ class IntermediateVectorTile:
             -miny * y_scale,
         )
 
-        self._features: list[_TileFeature] = []
+        # Min-heap of (priority, seq, _TileFeature); holds the top-k by
+        # priority. seq is an insertion tiebreaker so heap comparisons never
+        # fall through to comparing feature objects.
+        self._heap: list[tuple[int, int, _TileFeature]] = []
+        self._seq = 0
         self._features_seen = 0
-        self._small_geometry_area = 30.0
 
     @property
     def tile_id(self) -> int:
@@ -85,44 +114,50 @@ class IntermediateVectorTile:
     @property
     def feature_count(self) -> int:
         """Number of retained raw features."""
-        return len(self._features)
+        return len(self._heap)
+
+    @property
+    def _features(self) -> list[_TileFeature]:
+        """Retained features (arbitrary order); kept for introspection."""
+        return [entry[2] for entry in self._heap]
 
     def add_feature(
         self,
         geometry: Any,
         properties: dict[str, Any] | None = None,
+        priority: int | None = None,
     ) -> bool:
-        """Reservoir-sample a Web Mercator geometry by feature count."""
+        """Offer a Web Mercator geometry; keep it if it ranks in the top-k.
+
+        ``priority`` should be :func:`feature_priority` of the feature's
+        canonical (source) WKB bytes so that every tile the feature touches
+        ranks it identically. When omitted it is derived from the current
+        geometry's WKB.
+        """
         if geometry is None or geometry.is_empty:
             return False
 
         self._features_seen += 1
 
-        if len(self._features) < self.feature_capacity:
-            # Have not yet filled the reservoir, so just append the new feature.
-            slot = len(self._features)
-        else:
-            # Reservoir sampling: randomly replace an existing feature with the new one.
-            slot = self.rng.randrange(self._features_seen) 
-            if slot >= self.feature_capacity:
-                # The new feature is not selected for retention, so skip it.
-                return False
+        if priority is None:
+            priority = feature_priority(shapely.to_wkb(geometry))
+        priority = int(priority)
+
+        if len(self._heap) >= self.feature_capacity and priority <= self._heap[0][0]:
+            return False
 
         clean_properties = {
             key: value
             for key, value in (properties or {}).items()
             if value is not None
         }
+        entry = (priority, self._seq, _TileFeature(geometry, clean_properties))
+        self._seq += 1
 
-        feature = _TileFeature(
-            geometry=geometry,
-            properties=clean_properties,
-        )
-        if slot == len(self._features):
-            self._features.append(feature)
+        if len(self._heap) < self.feature_capacity:
+            heapq.heappush(self._heap, entry)
         else:
-            # Remove the feature in the slot to replace
-            self._features[slot] = feature
+            heapq.heapreplace(self._heap, entry)
         return True
 
     def simplify_geometry(self, geometry: Any) -> list[Any]:
@@ -140,7 +175,8 @@ class IntermediateVectorTile:
         )
 
         minx, miny, maxx, maxy = geometry.bounds
-        if (maxx - minx) * (maxy - miny) <= self._small_geometry_area:
+        threshold = _SMALL_GEOMETRY_EXTENT_PX * (self.extent / EXTENT)
+        if (maxx - minx) <= threshold and (maxy - miny) <= threshold:
             centroid = geometry.centroid
             geometry = Point(centroid.x, centroid.y)
 
@@ -160,70 +196,47 @@ class IntermediateVectorTile:
         return out
 
     def merge(self, other: "IntermediateVectorTile") -> None:
-        """Merge another tile with the same z/x/y using an exact count split."""
-        # Verify that both tiles have the same location
+        """Merge another partial tile for the same z/x/y: top-k union.
+
+        Every entry keeps the priority it was offered with, so the merged
+        result is exactly the top ``feature_capacity`` features by priority
+        across both partials — deterministic and independent of merge order.
+        """
         if (self.z, self.x, self.y) != (other.z, other.x, other.y):
             raise ValueError("Cannot merge intermediate tiles with different tile IDs")
-        total_seen = self._features_seen + other._features_seen
 
-        if total_seen <= self.feature_capacity:
-            self._features.extend(other._features)
-            self._features_seen = total_seen
-            return
+        combined = [(p, s) for (p, _, s) in self._heap]
+        combined.extend((p, s) for (p, _, s) in other._heap)
+        # Sort by priority (stable: self's entries win ties deterministically).
+        combined.sort(key=lambda item: item[0], reverse=True)
+        kept = combined[: self.feature_capacity]
 
-        other_count = 0
-        remaining_seen = total_seen
-        remaining_other = other._features_seen
-        remaining_draws = self.feature_capacity
-        while remaining_draws > 0 and remaining_seen > 0 and remaining_other > 0:
-            if self.rng.randrange(remaining_seen) < remaining_other:
-                other_count += 1
-                remaining_other -= 1
-            remaining_seen -= 1
-            remaining_draws -= 1
-
-        self_count = self.feature_capacity - other_count
-        self_count = min(self_count, len(self._features))
-        other_count = min(other_count, len(other._features))
-        if self_count + other_count < self.feature_capacity:
-            deficit = self.feature_capacity - (self_count + other_count)
-            if len(self._features) - self_count >= len(other._features) - other_count:
-                self_count += min(deficit, len(self._features) - self_count)
-            else:
-                other_count += min(deficit, len(other._features) - other_count)
-
-        def _sample_without_replacement(items: list[_TileFeature], count: int) -> list[_TileFeature]:
-            if count <= 0:
-                return []
-            if count >= len(items):
-                return list(items)
-            pool = list(items)
-            chosen: list[_TileFeature] = []
-            for _ in range(count):
-                index = self.rng.randrange(len(pool))
-                chosen.append(pool.pop(index))
-            return chosen
-
-        self_sample = _sample_without_replacement(self._features, self_count)
-        other_sample = _sample_without_replacement(other._features, other_count)
-
-        self._features = self_sample + other_sample
-        self._features_seen = total_seen
+        self._heap = []
+        self._seq = 0
+        for priority, feature in kept:
+            heapq.heappush(self._heap, (priority, self._seq, feature))
+            self._seq += 1
+        self._features_seen += other._features_seen
 
     def write_features(self, path) -> None:
-        """Write retained features and features-seen count to disk."""
+        """Write retained features, priorities, and seen count to disk."""
+        entries = list(self._heap)
         table = pa.table(
             {
                 "geometry": pa.array(
-                    [feature.geometry.wkb for feature in self._features],
+                    [entry[2].geometry.wkb for entry in entries],
                     type=pa.binary(),
                 ),
                 "properties": pa.array(
                     [
-                        json.dumps(feature.properties, separators=(",", ":"))
-                        for feature in self._features
+                        json.dumps(entry[2].properties, separators=(",", ":"))
+                        for entry in entries
                     ],
                     type=pa.string(),
+                ),
+                "priority": pa.array(
+                    [entry[0] for entry in entries],
+                    type=pa.uint64(),
                 ),
             }
         )
@@ -237,7 +250,7 @@ class IntermediateVectorTile:
             sink.write(payload)
 
     def load_features(self, path) -> None:
-        """Load retained features from disk without resampling."""
+        """Load retained features (with their priorities) from disk."""
         data = Path(path).read_bytes()
         self._features_seen = _FEATURES_SEEN_HEADER.unpack(data[:_FEATURES_SEEN_HEADER.size])[0]
         payload_offset = _FEATURES_SEEN_HEADER.size + _FEATURES_SEEN_PADDING
@@ -245,14 +258,17 @@ class IntermediateVectorTile:
 
         geometries = table["geometry"].to_pylist()
         properties = table["properties"].to_pylist()
-        for geometry_bytes, property_json in zip(geometries, properties):
+        if "priority" in table.column_names:
+            priorities = table["priority"].to_pylist()
+        else:
+            # Files written before the priority column: recompute from WKB.
+            priorities = [feature_priority(geometry_bytes) for geometry_bytes in geometries]
+
+        for geometry_bytes, property_json, priority in zip(geometries, properties, priorities):
             geometry = shapely.from_wkb(geometry_bytes)
-            self._features.append(
-                _TileFeature(
-                    geometry=geometry,
-                    properties=json.loads(property_json),
-                )
-            )
+            entry = (int(priority), self._seq, _TileFeature(geometry, json.loads(property_json)))
+            self._seq += 1
+            heapq.heappush(self._heap, entry)
 
     def encode(self, layer_name: str = "layer0") -> bytes:
         """Encode the retained features as an MVT binary payload."""
@@ -269,7 +285,7 @@ class IntermediateVectorTile:
 
     def _mvt_features(self) -> list[dict[str, Any]]:
         out = []
-        for feature in self._features:
+        for _, _, feature in self._heap:
             for geometry in self.simplify_geometry(feature.geometry):
                 out.append(
                     {

@@ -457,6 +457,22 @@ def _assignment_stage_worker(
         merged = _merge_sorted_partition_files(run_paths, str(merged_path), compression)
         if merged is not None:
             intermediate_by_reducer[reducer_id] = merged
+            # The per-batch run files are folded into the merged per-reducer
+            # file; delete them immediately so shuffle temp usage stays near
+            # one dataset copy instead of accumulating until the end-of-run
+            # rmtree.
+            for run_path in run_paths:
+                if run_path != merged:
+                    Path(run_path).unlink(missing_ok=True)
+
+    if rows_assigned < rows_read:
+        logger.warning(
+            "Split %d dropped %d of %d rows during partition assignment "
+            "(empty/None geometries or unassignable partitions)",
+            split_index,
+            rows_read - rows_assigned,
+            rows_read,
+        )
 
     return _ShardManifest(
         split_index=split_index,
