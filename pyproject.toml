@@ -24,6 +24,12 @@ dependencies = [
     'tomli>=1.2.2; python_version < "3.11"',
 ]
 
+[project.urls]
+Homepage = "https://github.com/ucr-bdlab/starlet"
+Repository = "https://github.com/ucr-bdlab/starlet"
+Documentation = "https://github.com/ucr-bdlab/starlet/blob/master/README.md"
+Issues = "https://github.com/ucr-bdlab/starlet/issues"
+
 [project.scripts]
 starlet = "starlet._cli:main"
 

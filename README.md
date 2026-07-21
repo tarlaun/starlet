@@ -1,10 +1,11 @@
 # Starlet
 
-Spatial tiling, Mapbox Vector Tile (MVT) generation, and on-demand tile serving
-for large geospatial datasets (GeoParquet / GeoJSON).
+**Turn large geospatial datasets into fast, interactive maps.** Starlet
+partitions a GeoParquet / GeoJSON file into spatial tiles, generates
+[Mapbox Vector Tiles](https://github.com/mapbox/vector-tile-spec), and serves
+them over HTTP with a built-in web viewer — all from a single command-line tool.
 
-The pipeline is: **partition a dataset into spatial tiles → build density
-histograms → (optionally) pre-generate MVTs → serve them over HTTP.**
+![Starlet vector-tile viewer showing country polygons with the MVT tile grid](https://raw.githubusercontent.com/ucr-bdlab/starlet/master/docs/images/starlet-viewer.png)
 
 ## Install
 
@@ -12,14 +13,21 @@ histograms → (optionally) pre-generate MVTs → serve them over HTTP.**
 pip install starlet
 ```
 
-Requires Python 3.10+. This installs the `starlet` command-line tool.
+Requires Python 3.10+. On systems where `pip` points at Python 2, use `pip3`:
 
-> Want to work on Starlet itself (run from a clone, run the tests)? See
-> [DEVELOPMENT.md](DEVELOPMENT.md).
+```bash
+pip3 install starlet
+```
+
+This installs the `starlet` command-line tool. Check it:
+
+```bash
+starlet --version
+```
 
 ## Quick start
 
-Turn a GeoParquet or GeoJSON file into a running tile server in two commands:
+Go from a data file to a live map in two commands:
 
 ```bash
 # 1. Build a dataset: partition into tiles + pre-generate vector tiles
@@ -29,122 +37,115 @@ starlet build --input data.parquet --outdir datasets/mydata
 starlet serve --dir datasets --port 8765
 ```
 
-Then open <http://localhost:8765> and pick your dataset to explore it on a map.
+Open <http://localhost:8765> and pick your dataset to explore it on a map.
+
+![Starlet dataset browser](https://raw.githubusercontent.com/ucr-bdlab/starlet/master/docs/images/starlet-datasets.png)
 
 ## Commands
 
-Everything is available through the `starlet` CLI (`starlet --help`).
+Everything runs through the `starlet` CLI. Run `starlet <command> --help` for the
+full option list.
 
-## Configuration
+| Command | What it does |
+|---------|--------------|
+| `starlet build` | Full pipeline: partition **and** generate vector tiles |
+| `starlet tile`  | Partition a dataset into spatial Parquet tiles only |
+| `starlet mvt`   | Generate vector tiles from an already-tiled dataset |
+| `starlet serve` | Run the HTTP tile server + web viewer |
+| `starlet info`  | Print a summary of a dataset (tiles, bbox, zoom levels) |
 
-Starlet supports a TOML configuration file for settings you typically set once and reuse.
-Make a copy of the file [starlet.toml.example](starlet.toml.example) and named it `starlet.toml`.
-Full details are in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
-The configurations in that file will be loaded by default when Starlet runs.
-You can also pass a file explicitly:
+### The options you'll actually use
 
-```bash
-starlet --config /path/to/starlet.toml build --input data.parquet --outdir datasets/mydata
-```
+| Option | Commands | Default | Description |
+|--------|----------|---------|-------------|
+| `--input` / `--outdir` | build, tile | required | Source file and output dataset directory |
+| `--zoom` | build, mvt | `7` | Maximum vector-tile zoom level |
+| `--geom-col` | build, tile | `geometry` | Geometry column name (use `wkb_geometry` for OGR/`ogr2ogr` exports) |
+| `--partition-size` | build, tile | `128mb` GeoParquet / `512mb` GeoJSON | Target tile size, e.g. `256mb`, `1gb` |
+| `--pmtiles` | build, mvt | off | Also export a single `.pmtiles` archive |
+| `--threshold` | build, mvt | `0` | Minimum feature count for a tile to be generated |
+| `--dir` | serve, mvt, info | required | Dataset directory (or the root of several, for `serve`) |
+| `--port` | serve | `8765` | Port to bind the server |
 
-## Starlet CLI tools
-### `starlet build` — full pipeline (tile + MVT)
-
-```bash
-starlet build --input data.parquet --outdir datasets/mydata --zoom 8
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--input` | (required) | Path to a GeoParquet or GeoJSON file |
-| `--outdir` | (required) | Output dataset directory |
-| `--zoom` | 7 | Maximum MVT zoom level |
-| `--partition-size` | 512mb (GeoJSON) / 128mb (GeoParquet) | Target partition size, e.g. `256mb`, `1gb` |
-| `--threshold` | 0 | Minimum feature count per MVT tile |
-| `--pmtiles` | off | Also export a single `.pmtiles` archive |
-| `--covering-bbox` | on | Write per-row bbox columns for faster on-demand serving |
-
-### `starlet tile` — partition a dataset only
+### Examples
 
 ```bash
-starlet tile --input data.parquet --outdir datasets/mydata
-```
+# Build to a deeper zoom (more detail when you zoom in)
+starlet build --input roads.parquet --outdir datasets/roads --zoom 12
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--input` | (required) | Path to a GeoParquet or GeoJSON file |
-| `--outdir` | (required) | Output dataset directory |
-| `--partition-size` | 512mb (GeoJSON) / 128mb (GeoParquet) | Target partition size; the number of tiles is derived from the input size |
-| `--sort` | zorder | Within-tile row order: `zorder`, `hilbert`, `columns`, `none` |
-| `--covering-bbox` | on | Write per-row bbox columns for faster on-demand serving |
-| `--geom-col` | geometry | Geometry column name (e.g. `wkb_geometry` for OGR exports) |
-| `--compression` | zstd | Parquet compression codec |
-| `--seed` | 42 | Random seed for partitioning |
+# GeoJSON input, custom geometry column
+starlet build --input places.geojson --outdir datasets/places --geom-col wkb_geometry
 
-### `starlet mvt` — generate vector tiles from a tiled dataset
-
-```bash
-starlet mvt --dir datasets/mydata --zoom 7 --threshold 100000  # threshold optional; default 0
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dir` | (required) | Dataset directory (contains `parquet_tiles/` and `histograms/`) |
-| `--zoom` | 7 | Maximum zoom level |
-| `--threshold` | 0 | Minimum feature count per tile |
-| `--outdir` | `<dir>/mvt/` | MVT output directory |
-| `--pmtiles` | config / off | Combinen all tiles in a single `.pmtiles` archive |
-
-### `starlet serve` — launch the tile server
-
-```bash
+# Serve a whole folder of datasets; the viewer lists them all
 starlet serve --dir datasets --port 8765
+
+# Inspect what got built
+starlet info --dir datasets/roads
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dir` | (required) | Root directory containing dataset subdirectories |
-| `--host` | 0.0.0.0 | Host to bind |
-| `--port` | 8765 | Port to bind |
-| `--cache-size` | 256 | In-memory tile cache size |
+## Input formats
 
-### `starlet info` — inspect a dataset
+Starlet reads **GeoParquet**, **GeoJSON**, and **CSV** (with either `x`/`y`
+columns or a WKT column — see `starlet tile --help`). Source data is assumed to
+be longitude/latitude (EPSG:4326); tiles are produced in Web Mercator
+(EPSG:3857).
+
+## One-file distribution with PMTiles
+
+Pass `--pmtiles` to pack every generated tile into a single
+[PMTiles](https://github.com/protomaps/PMTiles) archive — handy for shipping a
+dataset as one file or hosting it on static storage:
 
 ```bash
-starlet info --dir datasets/mydata
+starlet build --input data.parquet --outdir datasets/mydata --pmtiles
 ```
 
 ## Server API
 
-Once `starlet serve` is running:
+While `starlet serve` is running:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/` | Interactive dataset selector |
-| `GET` | `/api/datasets` | List all datasets |
-| `GET` | `/datasets/<dataset>.json` | Dataset metadata |
-| `GET` | `/<dataset>/<z>/<x>/<y>.mvt` | Mapbox Vector Tile |
+| `GET` | `/` | Interactive dataset browser |
+| `GET` | `/api/datasets` | List available datasets |
+| `GET` | `/<dataset>/<z>/<x>/<y>.mvt` | A Mapbox Vector Tile |
+| `GET` | `/datasets/<dataset>.json` | Dataset metadata (bbox, zoom range) |
 | `GET`/`POST` | `/datasets/<dataset>/features.<csv\|geojson>` | Download features (optional geometry filter) |
-| `GET` | `/api/datasets/<dataset>/stats` | Attribute statistics |
+| `GET` | `/api/datasets/<dataset>/stats` | Per-attribute statistics |
 
-## Notes & tips
+Tiles are served in tiers — an in-memory LRU cache, then a pre-generated
+PMTiles archive or `.mvt` files on disk, then generated on the fly from the
+Parquet tiles when you zoom past the pre-built levels — so you can serve a
+dataset even without pre-generating every zoom.
 
-- **Geometry column** not named `geometry` (common with OGR/`pyogrio`
-  exports)? Pass `--geom-col wkb_geometry`.
-- **Serving tiles on the fly** (zooming past the pre-generated levels)? The
-  default tiling output includes covering bbox columns so the server can prune
-  row groups at read time. Use `--no-covering-bbox` only when optimizing for
-  smaller Parquet files and batch generation speed.
-- **One-file distribution:** `starlet mvt --pmtiles` writes a single
-  `datasets/mydata/tiles.pmtiles` archive inside the dataset directory. `starlet build`
-  forwards the same setting to its MVT stage.
+## Configuration
+
+Settings you reuse often (partition size, zoom, worker count, …) can live in a
+`starlet.toml` file instead of being passed on every command. Copy
+[`starlet.toml.example`](https://github.com/ucr-bdlab/starlet/blob/master/starlet.toml.example)
+to `starlet.toml` and edit it; Starlet loads it automatically. CLI flags always
+override the file. See
+[docs/CONFIGURATION.md](https://github.com/ucr-bdlab/starlet/blob/master/docs/CONFIGURATION.md)
+for the full list of keys.
 
 ## Deploying a server
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for a step-by-step guide to standing
-up a production tile server, including a no-root recipe behind an existing
-Apache install.
+[docs/DEPLOYMENT.md](https://github.com/ucr-bdlab/starlet/blob/master/docs/DEPLOYMENT.md)
+walks through standing up a production tile server, including a no-root recipe
+behind an existing Apache install.
+
+## Using Starlet from Python
+
+`starlet` is also importable — `tile()`, `generate_mvt()`, `build()`,
+`export_pmtiles()`, and `create_app()` are documented in
+[docs/PUBLIC_API.md](https://github.com/ucr-bdlab/starlet/blob/master/docs/PUBLIC_API.md).
+
+---
+
+**Want to work on Starlet itself** — run it from a clone, run the tests, or
+contribute a change? See
+**[DEVELOPMENT.md](https://github.com/ucr-bdlab/starlet/blob/master/DEVELOPMENT.md)**.
 
 ## License
 
-See the repository for license details.
+Starlet is distributed under the MIT License.
