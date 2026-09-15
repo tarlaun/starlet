@@ -34,7 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "zoom": 7,
         "threshold": 0,
         "pmtiles": False,
-        "feature_capacity": 10_000,
+        "feature_capacity": 25_000,
         "extent": 4096,
         "buffer": 256,
         "pmtiles_compression": "gzip",

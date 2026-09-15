@@ -56,7 +56,7 @@ impl PyDataset {
     }
 
     /// Generate one tile; returns the MVT bytes. Releases the GIL.
-    #[pyo3(signature = (z, x, y, feature_capacity = 10000, extent = 4096, buffer = 256))]
+    #[pyo3(signature = (z, x, y, feature_capacity = 25000, extent = 4096, buffer = 256))]
     fn generate_tile<'py>(
         &self,
         py: Python<'py>,
@@ -76,7 +76,7 @@ impl PyDataset {
     }
 
     /// Generate one tile and return `(bytes, stats_dict)` for diagnostics.
-    #[pyo3(signature = (z, x, y, feature_capacity = 10000, extent = 4096, buffer = 256))]
+    #[pyo3(signature = (z, x, y, feature_capacity = 25000, extent = 4096, buffer = 256))]
     fn generate_tile_with_stats<'py>(
         &self,
         py: Python<'py>,
@@ -104,7 +104,7 @@ impl PyDataset {
 
     /// Generate many tiles in parallel (rayon, GIL released). Returns a list
     /// aligned with `tiles`: MVT bytes, or `None` for tiles with no features.
-    #[pyo3(signature = (tiles, feature_capacity = 10000, extent = 4096, buffer = 256))]
+    #[pyo3(signature = (tiles, feature_capacity = 25000, extent = 4096, buffer = 256))]
     fn generate_tiles<'py>(
         &self,
         py: Python<'py>,
@@ -133,7 +133,7 @@ impl PyDataset {
     /// Generate many tiles in parallel and write each non-empty one to
     /// `<outdir>/<z>/<x>/<y>.mvt` (starlet's layout). Nothing crosses the GIL
     /// but the count of tiles written. Returns that count.
-    #[pyo3(signature = (outdir, tiles, feature_capacity = 10000, extent = 4096, buffer = 256))]
+    #[pyo3(signature = (outdir, tiles, feature_capacity = 25000, extent = 4096, buffer = 256))]
     fn write_tiles(
         &self,
         py: Python<'_>,

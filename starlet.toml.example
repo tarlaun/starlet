@@ -57,7 +57,7 @@ threshold = 0
 pmtiles = false
 
 # Maximum retained features per intermediate tile reservoir.
-feature_capacity = 10000
+feature_capacity = 25000
 
 # Vector tile extent.
 extent = 4096

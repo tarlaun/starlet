@@ -39,7 +39,7 @@ from starlet._internal.mvt.pyramid_partitioner import PyramidPartitioner
 from .helpers import EXTENT, explode_geom, mercator_tile_bounds
 
 
-DEFAULT_FEATURE_CAPACITY = 2_000
+DEFAULT_FEATURE_CAPACITY = 25_000
 _FEATURES_SEEN_HEADER = struct.Struct("<Q")
 _FEATURES_SEEN_PADDING = 0
 

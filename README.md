@@ -68,6 +68,7 @@ full option list.
 | `--partition-size` | build, tile | `128mb` GeoParquet / `512mb` GeoJSON | Target tile size, e.g. `256mb`, `1gb` |
 | `--pmtiles` | build, mvt | off | Also export a single `.pmtiles` archive |
 | `--threshold` | build, mvt | `0` | Minimum feature count for a tile to be generated |
+| `--feature-capacity` | build, mvt | `25000` | Max features kept per tile. Tiles with more are thinned by a deterministic sample; raise it for denser low-zoom tiles (bigger tiles), lower it for smaller ones |
 | `--dir` | serve, mvt, info | required | Dataset directory (or the root of several, for `serve`) |
 | `--port` | serve | `8765` | Port to bind the server |
 
