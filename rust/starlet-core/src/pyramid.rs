@@ -22,8 +22,8 @@
 //!
 //! Selection semantics are the same as `tiler.rs` and starlet's Python
 //! pipeline: the buffered-bounds bbox test, `crc32(source WKB)` priority,
-//! strict-greater replacement at capacity, and the per-feature
-//! collapse → simplify → clip chain.
+//! one sub-pixel feature per pixel cell, strict-greater top-k replacement
+//! for larger features, and the per-feature dot / simplify / clip chain.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -38,10 +38,10 @@ use parking_lot::Mutex;
 use rayon::prelude::*;
 
 use crate::geom::mercator::{lonlat_to_merc, tile_width, WORLD_MAX, WORLD_MIN};
-use crate::geom::{merc_bbox_to_lonlat, Geometry, TileId, TileTransform};
+use crate::geom::{merc_bbox_to_lonlat, GeomKind, Geometry, TileId, TileTransform};
 use crate::mvt::{LayerBuilder, TileWriter};
 use crate::pq::{arrow_value, wkb_at, BBOX_COLS};
-use crate::tiler::{to_tile_geometry, Dataset, Params, LAYER_NAME};
+use crate::tiler::{dot_cell, sub_pixel, to_tile_geometry, Dataset, Params, LAYER_NAME};
 
 const BATCH_SIZE: usize = 8192;
 
@@ -72,6 +72,44 @@ type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 /// `(priority, row group id, row)` — a min-heap on priority keeps the top-k.
 type Entry = (u32, u32, u32);
 type Heap = BinaryHeap<Reverse<Entry>>;
+
+/// Per-tile selection state: top-k of the features larger than a display
+/// pixel, and the best sub-pixel feature per pixel cell.
+#[derive(Default)]
+struct TileSel {
+    heap: Heap,
+    cells: FxMap<(i32, i32), Entry>,
+}
+
+impl TileSel {
+    #[inline]
+    fn offer(&mut self, cell: Option<(i32, i32)>, e: Entry, k: usize) {
+        match cell {
+            Some(c) => match self.cells.get_mut(&c) {
+                Some(cur) if e.0 <= cur.0 => {}
+                Some(cur) => *cur = e,
+                None => {
+                    self.cells.insert(c, e);
+                }
+            },
+            None => push_capped(&mut self.heap, e, k),
+        }
+    }
+    fn merge_from(&mut self, other: TileSel, k: usize) {
+        for Reverse(e) in other.heap.into_iter() {
+            push_capped(&mut self.heap, e, k);
+        }
+        for (c, e) in other.cells {
+            self.offer(Some(c), e, k);
+        }
+    }
+    fn len(&self) -> usize {
+        self.heap.len() + self.cells.len()
+    }
+    fn into_entries(self) -> impl Iterator<Item = Entry> {
+        self.heap.into_iter().map(|Reverse(e)| e).chain(self.cells.into_values())
+    }
+}
 
 #[inline]
 fn push_capped(h: &mut Heap, e: Entry, k: usize) {
@@ -210,12 +248,13 @@ impl Dataset {
         let candidates = AtomicU64::new(0);
 
         // ---- pass 1: select ------------------------------------------------
-        let merged: FxMap<u32, Heap> = rgs
+        let cell = p.cell();
+        let merged: FxMap<u32, TileSel> = rgs
             .par_iter()
             .enumerate()
             .try_fold(
-                FxMap::<u32, Heap>::default,
-                |mut acc, (rid, &(pi, rg))| -> Result<FxMap<u32, Heap>> {
+                FxMap::<u32, TileSel>::default,
+                |mut acc, (rid, &(pi, rg))| -> Result<FxMap<u32, TileSel>> {
                     let part = &self.parts[pi as usize];
                     let mut cols: Vec<&str> = vec![part.geom_col.as_str()];
                     if part.has_bbox_cols {
@@ -254,8 +293,8 @@ impl Dataset {
                             let prio = crc32fast::hash(w);
                             let row = (offs[bi] + i) as u32;
                             for &s in &slots {
-                                let h = acc.entry(s).or_default();
-                                push_capped(h, (prio, rid as u32, row), k);
+                                let c = dot_cell(&rb, &wanted.tts[s as usize], cell);
+                                acc.entry(s).or_default().offer(c, (prio, rid as u32, row), k);
                             }
                         }
                     }
@@ -263,19 +302,15 @@ impl Dataset {
                     Ok(acc)
                 },
             )
-            .try_reduce(FxMap::default, |mut a, b| {
+            .try_reduce(FxMap::default, |a, b| {
                 // merge the smaller map into the larger one
                 let (mut a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
-                for (slot, hb) in b {
+                for (slot, sb) in b {
                     match a.get_mut(&slot) {
                         None => {
-                            a.insert(slot, hb);
+                            a.insert(slot, sb);
                         }
-                        Some(ha) => {
-                            for Reverse(e) in hb.into_iter() {
-                                push_capped(ha, e, k);
-                            }
-                        }
+                        Some(sa) => sa.merge_from(sb, k),
                     }
                 }
                 Ok(a)
@@ -287,10 +322,14 @@ impl Dataset {
         let mut remaining: Vec<AtomicUsize> = Vec::with_capacity(wanted.ids.len());
         remaining.resize_with(wanted.ids.len(), || AtomicUsize::new(0));
         let mut total: u64 = 0;
-        for (slot, heap) in merged {
-            remaining[slot as usize].store(heap.len(), Ordering::Relaxed);
-            total += heap.len() as u64;
-            for Reverse((_, rid, row)) in heap.into_iter() {
+        // tiles with more sub-pixel features than the capacity carry their
+        // sub-pixel points as bare dots (same rule as `tiler.rs`)
+        let mut strip_point_attrs = vec![false; wanted.ids.len()];
+        for (slot, sel) in merged {
+            remaining[slot as usize].store(sel.len(), Ordering::Relaxed);
+            strip_point_attrs[slot as usize] = sel.cells.len() > k;
+            total += sel.len() as u64;
+            for (_, rid, row) in sel.into_entries() {
                 by_rg[rid as usize].push((row, slot));
             }
         }
@@ -362,14 +401,18 @@ impl Dataset {
                     for &(_, slot) in &winners[i..j] {
                         let slot = slot as usize;
                         if let Some(g) = geom.as_ref() {
-                            if let Some(tg) = to_tile_geometry(g, &wanted.tts[slot], p) {
+                            if let Some((tg, is_dot)) = to_tile_geometry(g, &wanted.tts[slot], p) {
                                 let mut guard = builders[slot].lock();
                                 if let Some(lb) = guard.as_mut() {
                                     tags.clear();
-                                    for (name, v) in &attrs {
-                                        let ki = lb.key(name);
-                                        let vi = lb.value(v);
-                                        tags.push((ki, vi));
+                                    let bare = is_dot
+                                        || (strip_point_attrs[slot] && tg.kind == GeomKind::Point && sub_pixel(&tg, p));
+                                    if !bare {
+                                        for (name, v) in &attrs {
+                                            let ki = lb.key(name);
+                                            let vi = lb.value(v);
+                                            tags.push((ki, vi));
+                                        }
                                     }
                                     lb.add_feature(None, &tg, &tags);
                                 }

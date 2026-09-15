@@ -3,12 +3,20 @@
 //!
 //! * partitions pruned by their filename bbox, row groups by `_bbox_*`
 //!   statistics, rows by bbox overlap (WKB bbox when the columns are absent);
-//! * features ranked by `crc32(source WKB)` and the top `feature_capacity`
-//!   kept (the same geometry-intrinsic priority the batch pipeline uses, so
-//!   adjacent on-demand and pre-generated tiles agree on what they keep);
-//! * per-feature pipeline in starlet's order: affine to tile units, collapse
-//!   shapes under 5.5 px (per dimension) to a point, Douglas-Peucker at 1 px
-//!   when a geometry has more than 10 vertices, then clip to extent+buffer.
+//! * **raster-consistent selection**: a feature whose bbox fits inside one
+//!   display pixel (`extent / PIXEL_GRID` tile units per side) competes only
+//!   with the other sub-pixel features of the *same pixel cell* — the one
+//!   with the highest `crc32(source WKB)` priority is kept — so a tile shows
+//!   every occupied pixel, like a rasterised plot, with a bounded number of
+//!   features. Features larger than a pixel are ranked by the same priority
+//!   and the top `feature_capacity` kept. The priority is geometry-intrinsic,
+//!   so adjacent on-demand and pre-generated tiles agree on what they keep.
+//! * per-feature pipeline: affine to tile units; a sub-pixel polygon becomes
+//!   a one-pixel square, a sub-pixel line a one-pixel segment (its geometry
+//!   type is preserved, so it is styled like its full-size siblings; such
+//!   *dots* carry no attributes — fetch them with `query_point`); larger
+//!   shapes get Douglas-Peucker at 1 tile unit when they have more than 10
+//!   vertices, then are clipped to extent+buffer.
 //!
 //! A row-group LRU makes neighbouring tiles (pans, zooms, batch pyramids)
 //! cheap: the decoded Arrow batches are shared across tiles.
@@ -28,13 +36,15 @@ use parking_lot::Mutex;
 
 use crate::geom::clip::{clip, Rect};
 use crate::geom::simplify::{signed_area, simplify_dp};
-use crate::geom::{merc_bbox_to_lonlat, GeomKind, Geometry, TileId, TileTransform};
+use crate::geom::{lonlat_to_merc, merc_bbox_to_lonlat, GeomKind, Geometry, TileId, TileTransform};
+use std::collections::HashMap;
 use crate::mvt::{LayerBuilder, TileWriter};
 use crate::pq::{arrow_value, parse_filename_bbox, wkb_at, PqFile, BBOX_COLS, INTERNAL_COLS};
 
 pub const LAYER_NAME: &str = "layer0";
-/// starlet's `_SMALL_GEOMETRY_EXTENT_PX`, scaled by `extent / 4096`.
-pub const SMALL_GEOMETRY_EXTENT_PX: f64 = 5.5;
+/// Display pixels per tile side used for the sub-pixel grid: a feature whose
+/// bbox fits in `extent / PIXEL_GRID` tile units (per dimension) is a "dot".
+pub const PIXEL_GRID: u32 = 512;
 /// starlet simplifies (tolerance 1 tile unit) only when a geometry has more than this many coordinates.
 pub const SIMPLIFY_MIN_COORDS: usize = 10;
 const BATCH_SIZE: usize = 8192;
@@ -44,6 +54,32 @@ pub struct Params {
     pub feature_capacity: usize,
     pub extent: u32,
     pub buffer: u32,
+}
+
+impl Params {
+    /// Side of one display pixel in tile units.
+    #[inline]
+    pub fn cell(&self) -> f64 {
+        self.extent as f64 / PIXEL_GRID as f64
+    }
+}
+
+/// Pixel cell of a sub-pixel feature, or `None` when the feature is larger
+/// than a pixel. `rb` is the feature bbox in EPSG:4326; the cell is keyed on
+/// the bbox centre in tile units (negative indices occur in the buffer).
+#[inline]
+pub fn dot_cell(rb: &[f64; 4], tt: &TileTransform, cell: f64) -> Option<(i32, i32)> {
+    let (ax, ay) = lonlat_to_merc(rb[0], rb[1]);
+    let (bx, by) = lonlat_to_merc(rb[2], rb[3]);
+    let (x0, y0) = tt.apply(ax, ay);
+    let (x1, y1) = tt.apply(bx, by);
+    if (x1 - x0).abs() <= cell && (y1 - y0).abs() <= cell {
+        let cx = (x0 + x1) * 0.5;
+        let cy = (y0 + y1) * 0.5;
+        Some(((cx / cell).floor() as i32, (cy / cell).floor() as i32))
+    } else {
+        None
+    }
 }
 
 pub struct Partition {
@@ -171,11 +207,15 @@ impl Dataset {
         let q = merc_bbox_to_lonlat(&q_merc);
         let mut stats = Stats { partitions_total: self.parts.len(), ..Default::default() };
 
-        // ---- candidates: top-k by crc32(wkb) over bbox-pruned rows ----------
+        // ---- candidates ------------------------------------------------------
+        // Features larger than a display pixel: top-k by crc32(wkb).
+        // Sub-pixel features: the best one per pixel cell (raster-consistent).
         let k = p.feature_capacity.max(1);
+        let cell = p.cell();
         let mut batches: Vec<(Arc<CachedRg>, usize, usize)> = Vec::new(); // (row group, batch idx, partition idx)
         // min-heap on (priority, seq); payload = (batch slot, row)
         let mut heap: BinaryHeap<Reverse<(u32, u64, usize, u32)>> = BinaryHeap::with_capacity(k + 1);
+        let mut cells: HashMap<(i32, i32), (u32, u64, usize, u32)> = HashMap::new();
         let mut seq: u64 = 0;
 
         for (pi, part) in self.parts.iter().enumerate() {
@@ -228,14 +268,24 @@ impl Dataset {
                         }
                         stats.candidates += 1;
                         let prio = crc32fast::hash(w);
-                        if heap.len() >= k {
-                            // starlet: skip unless strictly higher than the current minimum
-                            if prio <= heap.peek().unwrap().0 .0 {
-                                continue;
+                        if let Some(c) = dot_cell(&rb, &tt, cell) {
+                            match cells.get_mut(&c) {
+                                Some(cur) if prio <= cur.0 => continue,
+                                Some(cur) => *cur = (prio, seq, slot, i as u32),
+                                None => {
+                                    cells.insert(c, (prio, seq, slot, i as u32));
+                                }
                             }
-                            heap.pop();
+                        } else {
+                            if heap.len() >= k {
+                                // starlet: skip unless strictly higher than the current minimum
+                                if prio <= heap.peek().unwrap().0 .0 {
+                                    continue;
+                                }
+                                heap.pop();
+                            }
+                            heap.push(Reverse((prio, seq, slot, i as u32)));
                         }
-                        heap.push(Reverse((prio, seq, slot, i as u32)));
                         seq += 1;
                         used = true;
                     }
@@ -249,8 +299,15 @@ impl Dataset {
         // ---- winners -> tile features ---------------------------------------
         let mut layer = LayerBuilder::new(LAYER_NAME, p.extent);
         let mut tags: Vec<(u32, u32)> = Vec::new();
-        let winners: Vec<(usize, u32)> = heap.into_iter().map(|Reverse((_, _, s, r))| (s, r)).collect();
-        for (slot, row) in winners {
+        // Sub-pixel *points* keep their attributes only while the tile has
+        // at most `feature_capacity` sub-pixel features; denser tiles carry
+        // them as bare dots (attributes stay reachable through `query`).
+        let strip_point_attrs = cells.len() > k;
+        let mut winners: Vec<(u64, usize, u32)> =
+            heap.into_iter().map(|Reverse((_, q, s, r))| (q, s, r)).collect();
+        winners.extend(cells.into_values().map(|(_, q, s, r)| (q, s, r)));
+        winners.sort_unstable(); // deterministic feature order (offer order)
+        for (_, slot, row) in winners {
             let (rgc, bi, pi) = &batches[slot];
             let b = &rgc.batches[*bi];
             let part = &self.parts[*pi];
@@ -258,14 +315,17 @@ impl Dataset {
             let Some(w) = wkb_at(b, gi, row as usize) else { continue };
             let Ok(mut g) = Geometry::from_wkb(w) else { continue };
             g.from_lonlat_to_merc();
-            let Some(tg) = to_tile_geometry(&g, &tt, p) else { continue };
+            let Some((tg, is_dot)) = to_tile_geometry(&g, &tt, p) else { continue };
             tags.clear();
-            for name in &part.attr_cols {
-                if let Ok(ci) = b.schema().index_of(name) {
-                    if let Some(v) = arrow_value(b.column(ci), row as usize) {
-                        let ki = layer.key(name);
-                        let vi = layer.value(&v);
-                        tags.push((ki, vi));
+            let bare = is_dot || (strip_point_attrs && tg.kind == GeomKind::Point && sub_pixel(&tg, p));
+            if !bare {
+                for name in &part.attr_cols {
+                    if let Ok(ci) = b.schema().index_of(name) {
+                        if let Some(v) = arrow_value(b.column(ci), row as usize) {
+                            let ki = layer.key(name);
+                            let vi = layer.value(&v);
+                            tags.push((ki, vi));
+                        }
                     }
                 }
             }
@@ -278,24 +338,213 @@ impl Dataset {
     }
 }
 
+/// One record returned by `Dataset::query`.
+pub struct Hit {
+    pub bbox: [f64; 4],
+    pub kind: GeomKind,
+    pub attrs: Vec<(String, crate::mvt::Value)>,
+}
+
+impl Dataset {
+    /// Records whose geometry intersects the lon/lat box `q` (exact test
+    /// after bbox pruning), with their attributes — the "click on a record"
+    /// lookup. At most `limit` hits, in file order.
+    pub fn query(&self, q: &[f64; 4], limit: usize) -> Result<Vec<Hit>> {
+        let mut hits = Vec::new();
+        for (pi, part) in self.parts.iter().enumerate() {
+            if !bbox_intersects(&part.bbox, q) {
+                continue;
+            }
+            let rgs = if part.has_bbox_cols {
+                part.file.prune_bbox(q)
+            } else {
+                (0..part.file.num_row_groups()).collect()
+            };
+            let mut cols: Vec<&str> = vec![part.geom_col.as_str()];
+            if part.has_bbox_cols {
+                cols.extend(BBOX_COLS.iter());
+            }
+            cols.extend(part.attr_cols.iter().map(|s| s.as_str()));
+            for rg in rgs {
+                let rgc = self.read_rg_cached(pi, rg, &cols)?;
+                for (bi, b) in rgc.batches.iter().enumerate() {
+                    let gi = b.schema().index_of(&part.geom_col)?;
+                    let cached_bb = rgc.bboxes.as_ref().map(|v| &v[bi]);
+                    for i in 0..b.num_rows() {
+                        let Some(w) = wkb_at(b, gi, i) else { continue };
+                        let rb: [f64; 4] = match cached_bb {
+                            Some(bbs) => bbs[i],
+                            None => {
+                                if part.has_bbox_cols {
+                                    [
+                                        b.column(b.schema().index_of(BBOX_COLS[0])?).as_primitive::<Float64Type>().value(i),
+                                        b.column(b.schema().index_of(BBOX_COLS[1])?).as_primitive::<Float64Type>().value(i),
+                                        b.column(b.schema().index_of(BBOX_COLS[2])?).as_primitive::<Float64Type>().value(i),
+                                        b.column(b.schema().index_of(BBOX_COLS[3])?).as_primitive::<Float64Type>().value(i),
+                                    ]
+                                } else {
+                                    match Geometry::wkb_bbox(w) {
+                                        Ok(bb) => bb.arr(),
+                                        Err(_) => continue,
+                                    }
+                                }
+                            }
+                        };
+                        if !bbox_intersects(&rb, q) {
+                            continue;
+                        }
+                        let Ok(g) = Geometry::from_wkb(w) else { continue };
+                        if !geom_intersects_rect(&g, q) {
+                            continue;
+                        }
+                        let mut attrs = Vec::with_capacity(part.attr_cols.len());
+                        for name in &part.attr_cols {
+                            if let Ok(ci) = b.schema().index_of(name) {
+                                if let Some(v) = arrow_value(b.column(ci), i) {
+                                    attrs.push((name.clone(), v));
+                                }
+                            }
+                        }
+                        hits.push(Hit { bbox: rb, kind: g.kind, attrs });
+                        if hits.len() >= limit {
+                            return Ok(hits);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(hits)
+    }
+}
+
+/// Exact geometry ∩ axis-aligned rectangle test in the geometry's own CRS.
+fn geom_intersects_rect(g: &Geometry, q: &[f64; 4]) -> bool {
+    let inside = |p: &[f64; 2]| p[0] >= q[0] && p[0] <= q[2] && p[1] >= q[1] && p[1] <= q[3];
+    let seg_hits = |a: &[f64; 2], b: &[f64; 2]| -> bool {
+        // Liang-Barsky
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let mut t0 = 0.0f64;
+        let mut t1 = 1.0f64;
+        for (pk, qk) in [(-dx, a[0] - q[0]), (dx, q[2] - a[0]), (-dy, a[1] - q[1]), (dy, q[3] - a[1])] {
+            if pk == 0.0 {
+                if qk < 0.0 {
+                    return false;
+                }
+            } else {
+                let t = qk / pk;
+                if pk < 0.0 {
+                    t0 = t0.max(t);
+                } else {
+                    t1 = t1.min(t);
+                }
+                if t0 > t1 {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+    match g.kind {
+        GeomKind::Point => g.parts.iter().flatten().any(inside),
+        GeomKind::Line => g.parts.iter().any(|l| l.windows(2).any(|w| seg_hits(&w[0], &w[1]))),
+        GeomKind::Polygon => {
+            let centre = [(q[0] + q[2]) * 0.5, (q[1] + q[3]) * 0.5];
+            for i in 0..g.n_parts() {
+                let rings = g.poly_rings(i);
+                if rings.is_empty() {
+                    continue;
+                }
+                // boundary crosses the box, or box centre inside the polygon
+                if rings.iter().any(|r| r.windows(2).any(|w| seg_hits(&w[0], &w[1]))) {
+                    return true;
+                }
+                if point_in_ring(&centre, &rings[0]) && !rings[1..].iter().any(|h| point_in_ring(&centre, h)) {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Even-odd ray casting.
+fn point_in_ring(p: &[f64; 2], ring: &[[f64; 2]]) -> bool {
+    let mut inside = false;
+    let n = ring.len();
+    if n < 3 {
+        return false;
+    }
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = (ring[i][0], ring[i][1]);
+        let (xj, yj) = (ring[j][0], ring[j][1]);
+        if (yi > p[1]) != (yj > p[1]) && p[0] < (xj - xi) * (p[1] - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 #[inline]
 fn bbox_intersects(a: &[f64; 4], b: &[f64; 4]) -> bool {
     !(a[2] < b[0] || a[0] > b[2] || a[3] < b[1] || a[1] > b[3])
 }
 
-/// starlet's `simplify_geometry` pipeline on a Mercator geometry.
-pub fn to_tile_geometry(g_merc: &Geometry, tt: &TileTransform, p: &Params) -> Option<Geometry> {
+/// Whether a tile-unit geometry fits inside one display pixel.
+#[inline]
+pub fn sub_pixel(g: &Geometry, p: &Params) -> bool {
+    let bb = g.bbox();
+    bb.width() <= p.cell() && bb.height() <= p.cell()
+}
+
+/// starlet's `simplify_geometry` pipeline on a Mercator geometry. Returns
+/// the tile-unit geometry and whether it was reduced to a one-pixel *dot*
+/// (a collapsed polygon or line; dots carry no attributes).
+pub fn to_tile_geometry(g_merc: &Geometry, tt: &TileTransform, p: &Params) -> Option<(Geometry, bool)> {
     let mut g = g_merc.clone();
     g.map_coords(|x, y| tt.apply(x, y));
     if g.is_empty() {
         return None;
     }
-    // collapse small shapes (per dimension) to their centre
+    // sub-pixel shapes become a one-pixel shape of the same kind
     let bb = g.bbox();
-    let thr = SMALL_GEOMETRY_EXTENT_PX * (p.extent as f64 / 4096.0);
-    if bb.width() <= thr && bb.height() <= thr {
+    let cell = p.cell();
+    if bb.width() <= cell && bb.height() <= cell {
         let c = bb.center();
-        return Some(Geometry { kind: GeomKind::Point, parts: vec![vec![c]], polys: vec![] });
+        let h = cell * 0.5;
+        // keep dots inside the buffered tile only (a point is never clipped,
+        // but a dot outside the buffer is invisible and just costs bytes)
+        let b = p.buffer as f64;
+        let e = p.extent as f64;
+        if c[0] < -b || c[1] < -b || c[0] > e + b || c[1] > e + b {
+            return None;
+        }
+        return Some(match g.kind {
+            GeomKind::Point => (Geometry { kind: GeomKind::Point, parts: vec![vec![c]], polys: vec![] }, false),
+            GeomKind::Line => (
+                Geometry {
+                    kind: GeomKind::Line,
+                    parts: vec![vec![[c[0] - h, c[1]], [c[0] + h, c[1]]]],
+                    polys: vec![],
+                },
+                true,
+            ),
+            GeomKind::Polygon => (
+                Geometry {
+                    kind: GeomKind::Polygon,
+                    parts: vec![vec![
+                        [c[0] - h, c[1] - h],
+                        [c[0] + h, c[1] - h],
+                        [c[0] + h, c[1] + h],
+                        [c[0] - h, c[1] + h],
+                        [c[0] - h, c[1] - h],
+                    ]],
+                    polys: vec![0],
+                },
+                true,
+            ),
+        });
     }
     // simplify at 1 tile unit when the geometry is "big enough"
     if g.vertex_count() > SIMPLIFY_MIN_COORDS && g.kind != GeomKind::Point {
@@ -311,7 +560,7 @@ pub fn to_tile_geometry(g_merc: &Geometry, tt: &TileTransform, p: &Params) -> Op
     if g.is_empty() {
         None
     } else {
-        Some(g)
+        Some((g, false))
     }
 }
 
@@ -358,5 +607,56 @@ fn drop_degenerate(g: Geometry) -> Option<Geometry> {
                 Some(out)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sub_pixel_polygon_becomes_one_pixel_square_without_attributes() {
+        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256 };
+        let tt = TileTransform::new(TileId::new(0, 0, 0), 4096, 256);
+        // a 1 m square near the origin: far below one pixel at z0
+        let (x, y) = lonlat_to_merc(10.0, 45.0);
+        let sq = Geometry {
+            kind: GeomKind::Polygon,
+            parts: vec![vec![[x, y], [x + 1.0, y], [x + 1.0, y + 1.0], [x, y + 1.0], [x, y]]],
+            polys: vec![0],
+        };
+        let (g, is_dot) = to_tile_geometry(&sq, &tt, &p).unwrap();
+        assert!(is_dot);
+        assert_eq!(g.kind, GeomKind::Polygon);
+        let bb = g.bbox();
+        assert!((bb.width() - p.cell()).abs() < 1e-9 && (bb.height() - p.cell()).abs() < 1e-9);
+        // its lon/lat bbox lands in a pixel cell; a big polygon does not
+        assert!(dot_cell(&[10.0, 45.0, 10.00001, 45.00001], &tt, p.cell()).is_some());
+        assert!(dot_cell(&[-10.0, 30.0, 40.0, 60.0], &tt, p.cell()).is_none());
+    }
+
+    #[test]
+    fn native_points_are_never_dots() {
+        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256 };
+        let tt = TileTransform::new(TileId::new(0, 0, 0), 4096, 256);
+        let (x, y) = lonlat_to_merc(10.0, 45.0);
+        let pt = Geometry { kind: GeomKind::Point, parts: vec![vec![[x, y]]], polys: vec![] };
+        let (g, is_dot) = to_tile_geometry(&pt, &tt, &p).unwrap();
+        assert!(!is_dot && g.kind == GeomKind::Point);
+    }
+
+    #[test]
+    fn query_rect_tests() {
+        let sq = Geometry {
+            kind: GeomKind::Polygon,
+            parts: vec![vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0], [0.0, 0.0]]],
+            polys: vec![0],
+        };
+        assert!(geom_intersects_rect(&sq, &[4.0, 4.0, 5.0, 5.0])); // inside
+        assert!(geom_intersects_rect(&sq, &[9.5, 4.0, 11.0, 5.0])); // crosses edge
+        assert!(!geom_intersects_rect(&sq, &[20.0, 20.0, 21.0, 21.0]));
+        let ln = Geometry { kind: GeomKind::Line, parts: vec![vec![[0.0, 0.0], [10.0, 10.0]]], polys: vec![] };
+        assert!(geom_intersects_rect(&ln, &[4.0, 4.0, 6.0, 6.0]));
+        assert!(!geom_intersects_rect(&ln, &[0.0, 8.0, 2.0, 10.0]));
     }
 }

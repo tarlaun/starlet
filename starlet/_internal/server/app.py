@@ -261,6 +261,40 @@ def create_app(
         except Exception as e:
             return {"error": f"Internal error: {str(e)}"}, 500
 
+    @app.get("/datasets/<dataset>/features/at.json")
+    def get_features_at(dataset):
+        """Records whose geometry intersects a small lon/lat box — what the
+        viewer calls when a record is clicked. Exact (bbox-pruned, then a
+        geometry test) via the Rust core when it is installed; otherwise the
+        Python sample lookup (one record)."""
+        dataset_path = data_root / dataset
+        if not dataset_path.exists() or not dataset_path.is_dir():
+            return {"error": "Dataset not found"}, 404
+        mbr_string = request.args.get("mbr", default=None)
+        if not mbr_string:
+            return {"error": "MBR query parameter is required"}, 400
+        try:
+            mbr = tuple(float(v) for v in mbr_string.split(","))
+            if len(mbr) != 4:
+                raise ValueError("mbr must be minx,miny,maxx,maxy")
+            limit = max(1, min(int(request.args.get("limit", 20)), 200))
+        except ValueError as e:
+            return {"error": str(e)}, 400
+        try:
+            from starlet._internal.mvt import rust_engine
+            from starlet._internal.mvt.mvt_generator import _rust_supports_dataset
+
+            if rust_engine.available() and _rust_supports_dataset(str(dataset_path)):
+                hits = rust_engine.query(dataset_path, mbr, limit=limit)
+                return Response(json.dumps({"features": hits}), mimetype="application/json")
+            sample = feature_service.get_sample_record(dataset, mbr_string, include_geometry=False)
+            hits = [{"properties": sample.get("properties", sample)}] if sample else []
+            return Response(json.dumps({"features": hits}), mimetype="application/json")
+        except FileNotFoundError as e:
+            return {"error": str(e)}, 404
+        except Exception as e:
+            return {"error": f"Internal error: {str(e)}"}, 500
+
     @app.get("/datasets/<dataset>/features/sample.geojson")
     def get_sample_with_geometry(dataset):
         dataset_path = data_root / dataset

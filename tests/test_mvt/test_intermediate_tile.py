@@ -2,9 +2,14 @@
 
 import mapbox_vector_tile
 import pytest
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, Point, Polygon, box
 
 from starlet._internal.mvt.intermediate_tile import IntermediateVectorTile
+
+
+def _big(x, size=1_000_000.0):
+    """A polygon far larger than one display pixel at z0 (cell ~ 78 km)."""
+    return box(x, 0.0, x + size, size)
 
 
 def _mercator_from_tile_pixel(tile, x, y):
@@ -79,7 +84,7 @@ def test_add_feature_delays_simplification_until_features_are_requested():
 
 def test_feature_can_be_skipped_by_lower_priority():
     tile = IntermediateVectorTile(0, 0, 0, feature_capacity=1)
-    assert tile.add_feature(Point(0, 0), {"id": 1}, priority=10)
+    assert tile.add_feature(_big(0), {"id": 1}, priority=10)
 
     called = False
 
@@ -90,16 +95,16 @@ def test_feature_can_be_skipped_by_lower_priority():
 
     tile.simplify_geometry = fail_if_called
 
-    assert not tile.add_feature(Point(1000, 0), {"id": 2}, priority=5)
+    assert not tile.add_feature(_big(3e6), {"id": 2}, priority=5)
     assert not called
 
 
 def test_feature_capacity_evicts_lowest_priority_to_make_room():
     tile = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
 
-    assert tile.add_feature(Point(-1000, 0), {"id": 1}, priority=1)
-    assert tile.add_feature(Point(0, 0), {"id": 2}, priority=5)
-    assert tile.add_feature(Point(1000, 0), {"id": 3}, priority=9)
+    assert tile.add_feature(_big(-3e6), {"id": 1}, priority=1)
+    assert tile.add_feature(_big(0), {"id": 2}, priority=5)
+    assert tile.add_feature(_big(3e6), {"id": 3}, priority=9)
 
     retained_ids = {feature.properties["id"] for feature in tile._features}
     assert retained_ids == {2, 3}
@@ -110,9 +115,9 @@ def test_feature_capacity_evicts_lowest_priority_to_make_room():
 def test_merge_combines_same_tile_without_simplifying_again():
     left = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
     right = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
-    left.add_feature(Point(-1000, 0), {"id": 1}, priority=1)
-    right.add_feature(Point(0, 0), {"id": 2}, priority=5)
-    right.add_feature(Point(1000, 0), {"id": 3}, priority=9)
+    left.add_feature(_big(-3e6), {"id": 1}, priority=1)
+    right.add_feature(_big(0), {"id": 2}, priority=5)
+    right.add_feature(_big(3e6), {"id": 3}, priority=9)
 
     def fail_if_called(geometry):
         raise AssertionError("merge should not simplify geometries")
@@ -165,8 +170,8 @@ def test_encode_accepts_layer_name():
 def test_feature_arrow_roundtrip_populates_tile_state(tmp_path):
     path = tmp_path / "0-0-0.pyarrow"
     tile = IntermediateVectorTile(0, 0, 0, feature_capacity=1)
-    tile.add_feature(Point(0, 0), {"id": 1}, priority=9)
-    tile.add_feature(Point(1, 1), {"id": 2}, priority=1)
+    tile.add_feature(_big(0), {"id": 1}, priority=9)
+    tile.add_feature(_big(3e6), {"id": 2}, priority=1)
     tile.write_features(path)
 
     loaded = IntermediateVectorTile(0, 0, 0, feature_capacity=10)
@@ -183,7 +188,7 @@ def test_same_geometry_gets_same_default_priority_in_every_tile():
     """A geometry offered to two different tiles must win or lose in both."""
     from starlet._internal.mvt.intermediate_tile import feature_priority
 
-    shared = Point(0, 0).buffer(10.0)
+    shared = Point(30, 30).buffer(10.0)
     assert feature_priority(shared.wkb) == feature_priority(shared.wkb)
 
     left = IntermediateVectorTile(1, 0, 0, feature_capacity=1)
@@ -191,7 +196,7 @@ def test_same_geometry_gets_same_default_priority_in_every_tile():
     for tile in (left, right):
         tile.add_feature(shared, {"id": "shared"})
 
-    competitor = Point(1, 1).buffer(5.0)
+    competitor = Point(31, 31).buffer(5.0)
     left_kept = left.add_feature(competitor, {"id": "competitor"})
     right_kept = right.add_feature(competitor, {"id": "competitor"})
 
@@ -206,17 +211,68 @@ def test_merge_is_order_independent():
     a = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
     b = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
     c = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
-    a.add_feature(Point(-1000, 0), {"id": 1}, priority=3)
-    b.add_feature(Point(0, 0), {"id": 2}, priority=7)
-    c.add_feature(Point(1000, 0), {"id": 3}, priority=5)
+    a.add_feature(_big(-3e6), {"id": 1}, priority=3)
+    b.add_feature(_big(0), {"id": 2}, priority=7)
+    c.add_feature(_big(3e6), {"id": 3}, priority=5)
 
     def merged_ids(order):
         first = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
         for src in order:
             clone = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
-            for prio, _, feat in src._heap:
+            for prio, _, feat in src._entries():
                 clone.add_feature(feat.geometry, dict(feat.properties), priority=prio)
             first.merge(clone)
         return {feature.properties["id"] for feature in first._features}
 
     assert merged_ids([a, b, c]) == merged_ids([c, b, a]) == {2, 3}
+
+
+def test_sub_pixel_features_keep_one_per_pixel_cell_regardless_of_capacity():
+    tile = IntermediateVectorTile(0, 0, 0, feature_capacity=1)
+    # three points inside one display pixel (cell ~ 78 km at z0; the origin
+    # itself sits on a cell boundary, so stay clear of it): best priority wins
+    assert tile.add_feature(Point(1000, 1000), {"id": 1}, priority=3)
+    assert tile.add_feature(Point(1100, 1100), {"id": 2}, priority=9)
+    assert not tile.add_feature(Point(1200, 1200), {"id": 3}, priority=5)
+    assert {f.properties["id"] for f in tile._features} == {2}
+    # points in other pixels are kept even though the capacity is 1
+    assert tile.add_feature(Point(3e6, 0), {"id": 4}, priority=1)
+    assert tile.add_feature(Point(-3e6, 0), {"id": 5}, priority=1)
+    assert tile.feature_count == 3
+    # merge keeps the best of each cell
+    other = IntermediateVectorTile(0, 0, 0, feature_capacity=1)
+    other.add_feature(Point(1050, 1050), {"id": 6}, priority=20)
+    tile.merge(other)
+    assert {f.properties["id"] for f in tile._features} == {6, 4, 5}
+
+
+def test_sub_pixel_polygon_encodes_as_one_pixel_square_without_attributes():
+    tile = IntermediateVectorTile(0, 0, 0, feature_capacity=10)
+    tile.add_feature(Point(1e6, 1e6).buffer(10.0), {"id": 1})   # 20 m across
+    tile.add_feature(LineString([(2e6, 0), (2e6 + 10, 10)]), {"id": 2})
+    tile.add_feature(_big(-5e6), {"id": 3})
+    decoded = mapbox_vector_tile.decode(tile.encode())["layer0"]["features"]
+    by_type = {f["geometry"]["type"]: f for f in decoded}
+    assert set(by_type) == {"Polygon", "LineString"} or len(decoded) == 3
+    small = [f for f in decoded if f["properties"] == {}]
+    assert len(small) == 2  # the dots carry no attributes
+    kinds = sorted(f["geometry"]["type"] for f in small)
+    assert kinds == ["LineString", "Polygon"]  # ... but keep their geometry type
+    sq = next(f for f in small if f["geometry"]["type"] == "Polygon")
+    xs = [c[0] for c in sq["geometry"]["coordinates"][0]]
+    assert max(xs) - min(xs) == tile.cell
+    big = next(f for f in decoded if f["properties"])
+    assert big["properties"] == {"id": 3}
+
+
+def test_dense_sub_pixel_points_drop_attributes_beyond_capacity():
+    tile = IntermediateVectorTile(0, 0, 0, feature_capacity=1)
+    tile.add_feature(Point(0, 0), {"id": 1})
+    tile.add_feature(Point(3e6, 0), {"id": 2})
+    decoded = mapbox_vector_tile.decode(tile.encode())["layer0"]["features"]
+    assert len(decoded) == 2 and all(f["properties"] == {} for f in decoded)
+    roomy = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
+    roomy.add_feature(Point(0, 0), {"id": 1})
+    roomy.add_feature(Point(3e6, 0), {"id": 2})
+    decoded = mapbox_vector_tile.decode(roomy.encode())["layer0"]["features"]
+    assert sorted(f["properties"]["id"] for f in decoded) == [1, 2]

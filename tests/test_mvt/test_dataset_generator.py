@@ -9,6 +9,7 @@ import pyarrow.parquet as pq
 from shapely import wkb
 from shapely.geometry import Point
 
+from starlet._internal.mvt.intermediate_tile import IntermediateVectorTile
 from starlet._internal.mvt.mvt_generator import (
     _TableBatch,
     _bucket_tile_ids,
@@ -197,12 +198,14 @@ def test_single_tile_sampling_decodes_only_retained_rows(monkeypatch, tmp_path):
     rows = list(range(10))
     table = pa.table(
         {
-            "geometry": [wkb.dumps(Point(float(index), float(index))) for index in rows],
+            # ten points inside one display pixel at z0 (0.0001 deg apart,
+            # away from the origin, which sits on a pixel-cell boundary)
+            "geometry": [wkb.dumps(Point(0.01 + index * 1e-4, 0.01 + index * 1e-4)) for index in rows],
             "id": rows,
-            "_bbox_xmin": [float(index) for index in rows],
-            "_bbox_ymin": [float(index) for index in rows],
-            "_bbox_xmax": [float(index) for index in rows],
-            "_bbox_ymax": [float(index) for index in rows],
+            "_bbox_xmin": [0.01 + index * 1e-4 for index in rows],
+            "_bbox_ymin": [0.01 + index * 1e-4 for index in rows],
+            "_bbox_xmax": [0.01 + index * 1e-4 for index in rows],
+            "_bbox_ymax": [0.01 + index * 1e-4 for index in rows],
         }
     ).replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")})
     pq.write_table(
@@ -226,11 +229,13 @@ def test_single_tile_sampling_decodes_only_retained_rows(monkeypatch, tmp_path):
         ParquetIndex(parquet_dir),
         (0.0, 0.0, 9.0, 9.0),
         3,
+        IntermediateVectorTile(0, 0, 0, feature_capacity=3),
     )
 
+    # one pixel cell -> one winner; only that row is decoded
     assert features is not None
-    assert len(features) == 3
-    assert decoded_batch_sizes == [3]
+    assert len(features) == 1
+    assert decoded_batch_sizes == [1]
 
 
 def test_single_tile_parquet_index_is_cached_by_path(tmp_path):

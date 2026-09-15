@@ -123,3 +123,10 @@ def generate_tiles(
         [(int(z), int(x), int(y)) for z, x, y in tiles],
         feature_capacity=int(feature_capacity), extent=int(extent), buffer=int(buffer),
     )
+
+
+def query(path: str | os.PathLike, mbr: tuple[float, float, float, float], *, limit: int = 50) -> list[dict]:
+    """Records intersecting ``mbr`` (lon/lat) with their attributes — the
+    "click on a record" lookup, exact after bbox pruning."""
+    minx, miny, maxx, maxy = mbr
+    return dataset(path).query(float(minx), float(miny), float(maxx), float(maxy), limit=int(limit))

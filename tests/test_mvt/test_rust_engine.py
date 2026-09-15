@@ -136,8 +136,10 @@ def test_batch_write_tiles_matches_python_per_tile(tmp_path):
 def test_feature_capacity_keeps_top_k_consistently_with_python(tmp_path):
     ds = _write_dataset(tmp_path / "ds", with_bbox=True)
     rust_engine.invalidate()
-    py = _generate_single_mvt_tile_python(str(ds), (1, 0, 0), feature_capacity=2)
-    rs = rust_engine.generate_tile(str(ds), 1, 0, 0, feature_capacity=2, extent=4096, buffer=256)
+    # tile 1/0/0 holds one point (sub-pixel: kept per pixel cell, never
+    # capped) and two larger-than-a-pixel features competing for capacity 1
+    py = _generate_single_mvt_tile_python(str(ds), (1, 0, 0), feature_capacity=1)
+    rs = rust_engine.generate_tile(str(ds), 1, 0, 0, feature_capacity=1, extent=4096, buffer=256)
     assert len(_props(rs)) == 2
     assert _props(rs) == _props(py)  # same crc32(WKB) priority => same survivors
 
@@ -176,8 +178,9 @@ def test_write_pyramid_matches_per_tile_generation(tmp_path, with_bbox):
         else:
             assert not path.exists(), f"{z}/{x}/{y} should be empty"
     assert st["tiles_written"] == expected_written
-    # capacity binds at z0 (4 features, cap 2): same survivors as pull mode
-    st2 = handle.write_pyramid(str(tmp_path / "pyr2"), [(0, 0, 0)], feature_capacity=2, extent=4096, buffer=256)
-    assert st2["features"] == 2
-    ref2 = handle.generate_tile(0, 0, 0, feature_capacity=2, extent=4096, buffer=256)
+    # capacity binds at z0 (2 points in their own pixel cells + 2 larger
+    # features, cap 1): same survivors as pull mode
+    st2 = handle.write_pyramid(str(tmp_path / "pyr2"), [(0, 0, 0)], feature_capacity=1, extent=4096, buffer=256)
+    assert st2["features"] == 3
+    ref2 = handle.generate_tile(0, 0, 0, feature_capacity=1, extent=4096, buffer=256)
     assert _decoded((tmp_path / "pyr2" / "0" / "0" / "0.mvt").read_bytes()) == _decoded(ref2)

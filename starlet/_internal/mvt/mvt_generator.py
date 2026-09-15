@@ -19,6 +19,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from pyproj import Transformer
 import shapely
 from shapely import from_wkb
 
@@ -547,18 +548,6 @@ def _generate_single_mvt_tile_python(
     index = _single_tile_parquet_index(parquet_dir)
     query_bounds_4326 = index._transform_bbox(query_bounds, WEB_MERCATOR_CRS, WGS84_CRS)
 
-    sampled_features = _sample_single_tile_records(
-        index,
-        query_bounds_4326,
-        feature_capacity,
-    )
-    if sampled_features is None:
-        sampled_features = _sample_single_tile_records_legacy(
-            index,
-            query_bounds_4326,
-            feature_capacity,
-        )
-
     tile = IntermediateVectorTile(
         int(z),
         int(x),
@@ -568,18 +557,53 @@ def _generate_single_mvt_tile_python(
         buffer=buffer,
     )
 
+    sampled_features = _sample_single_tile_records(
+        index,
+        query_bounds_4326,
+        feature_capacity,
+        tile,
+    )
+    if sampled_features is None:
+        sampled_features = _sample_single_tile_records_legacy(
+            index,
+            query_bounds_4326,
+            feature_capacity,
+            tile,
+        )
+
     for geom, attrs, priority in sampled_features:
         tile.add_feature(geom, attrs, priority=priority)
 
     return tile.encode(layer_name=layer_name)
 
 
+def _offer(heap, cells, cell, feature_capacity, priority, seq, payload):
+    """Shared pre-selection step: pixel-cell winner or top-k heap entry."""
+    if cell is not None:
+        current = cells.get(cell)
+        if current is not None and priority <= current[0]:
+            return False
+        cells[cell] = (priority, seq) + payload
+        return True
+    if len(heap) >= feature_capacity and priority <= heap[0][0]:
+        return False
+    entry = (priority, seq) + payload
+    if len(heap) < feature_capacity:
+        heapq.heappush(heap, entry)
+    else:
+        heapq.heapreplace(heap, entry)
+    return True
+
+
 def _sample_single_tile_records(
     index: ParquetIndex,
     query_bounds_4326: tuple[float, float, float, float],
     feature_capacity: int,
+    tile: IntermediateVectorTile,
 ) -> list[tuple[Any, dict[str, Any], int]] | None:
-    """Top-k sample raw parquet rows by priority before WKB parsing.
+    """Pre-select raw parquet rows before WKB parsing, with the tile's own
+    selection rule: sub-pixel rows (judged from their ``_bbox_*`` columns)
+    compete per pixel cell, larger rows in a top-k by priority.
 
     Rows are ranked by :func:`feature_priority` of their raw WKB bytes — the
     same geometry-intrinsic priority the batch pipeline uses — so adjacent
@@ -591,8 +615,9 @@ def _sample_single_tile_records(
     those legacy datasets need the older geometry-based path for correctness.
     """
     feature_capacity = max(1, int(feature_capacity))
-    # Min-heap of (priority, seq, wkb, crs, table, geom_col, row_idx).
+    # Entries: (priority, seq, wkb, crs, table, geom_col, row_idx).
     heap: list[tuple[int, int, bytes, Any, pa.Table, str, int]] = []
+    cells: dict[tuple[int, int], tuple[int, int, bytes, Any, pa.Table, str, int]] = {}
     seq = 0
 
     for path in index.find_intersecting_files(query_bounds_4326):
@@ -604,24 +629,33 @@ def _sample_single_tile_records(
         table = _read_bbox_filtered_table(path, bbox_native)
         if table.num_rows == 0:
             continue
+        bounds_merc = _mercator_row_bounds(table, crs)
         for row_idx, geometry_wkb in enumerate(table[geom_col].to_pylist()):
             if geometry_wkb is None:
                 continue
             priority = feature_priority(geometry_wkb)
-            if len(heap) >= feature_capacity and priority <= heap[0][0]:
-                continue
-            entry = (priority, seq, geometry_wkb, crs, table, geom_col, row_idx)
-            seq += 1
-            if len(heap) < feature_capacity:
-                heapq.heappush(heap, entry)
-            else:
-                heapq.heapreplace(heap, entry)
+            cell = tile.dot_cell(bounds_merc[row_idx])
+            if _offer(heap, cells, cell, feature_capacity, priority, seq,
+                      (geometry_wkb, crs, table, geom_col, row_idx)):
+                seq += 1
 
     samples = [
         (geometry_wkb, _row_attrs(table, geom_col, row_idx), crs, priority)
-        for (priority, _, geometry_wkb, crs, table, geom_col, row_idx) in heap
+        for (priority, _, geometry_wkb, crs, table, geom_col, row_idx) in list(heap) + list(cells.values())
     ]
     return _decode_sampled_features(samples)
+
+
+def _mercator_row_bounds(table: pa.Table, crs: Any) -> list[tuple[float, float, float, float]]:
+    """Per-row ``_bbox_*`` bounds reprojected to Web Mercator (vectorised)."""
+    xmin = table["_bbox_xmin"].to_numpy(zero_copy_only=False).astype(float)
+    ymin = table["_bbox_ymin"].to_numpy(zero_copy_only=False).astype(float)
+    xmax = table["_bbox_xmax"].to_numpy(zero_copy_only=False).astype(float)
+    ymax = table["_bbox_ymax"].to_numpy(zero_copy_only=False).astype(float)
+    transformer = Transformer.from_crs(crs, WEB_MERCATOR_CRS, always_xy=True)
+    x0, y0 = transformer.transform(xmin, ymin)
+    x1, y1 = transformer.transform(xmax, ymax)
+    return list(zip(np.minimum(x0, x1), np.minimum(y0, y1), np.maximum(x0, x1), np.maximum(y0, y1)))
 
 
 def _row_attrs(table: pa.Table, geom_col: str, row_idx: int) -> dict[str, Any]:
@@ -640,16 +674,19 @@ def _sample_single_tile_records_legacy(
     index: ParquetIndex,
     query_bounds_4326: tuple[float, float, float, float],
     feature_capacity: int,
+    tile: IntermediateVectorTile,
 ) -> list[tuple[Any, dict[str, Any], int]]:
-    """Top-k sample after exact legacy geometry filtering (no bbox columns).
+    """Pre-select after exact legacy geometry filtering (no bbox columns),
+    with the tile's selection rule (pixel cells + top-k).
 
     Priorities come from the WKB of the (already reprojected) geometries —
     still deterministic per geometry, so tiles over a legacy dataset stay
     mutually consistent. Attribute dicts are built only for winners.
     """
     feature_capacity = max(1, int(feature_capacity))
-    # Min-heap of (priority, seq, geom, col_arrays, row_idx).
+    # Entries: (priority, seq, geom, col_arrays, row_idx).
     heap: list[tuple[int, int, Any, dict[str, Any], int]] = []
+    cells: dict[tuple[int, int], tuple[int, int, Any, dict[str, Any], int]] = {}
     seq = 0
 
     for gdf in index.iter_query_batches(query_bounds_4326, target_crs=WEB_MERCATOR_CRS):
@@ -662,14 +699,9 @@ def _sample_single_tile_records_legacy(
             if geom is None or geom.is_empty:
                 continue
             priority = feature_priority(shapely.to_wkb(geom))
-            if len(heap) >= feature_capacity and priority <= heap[0][0]:
-                continue
-            entry = (priority, seq, geom, col_arrays, row_idx)
-            seq += 1
-            if len(heap) < feature_capacity:
-                heapq.heappush(heap, entry)
-            else:
-                heapq.heapreplace(heap, entry)
+            if _offer(heap, cells, tile.dot_cell(geom.bounds), feature_capacity, priority, seq,
+                      (geom, col_arrays, row_idx)):
+                seq += 1
 
     return [
         (
@@ -681,7 +713,7 @@ def _sample_single_tile_records_legacy(
             },
             priority,
         )
-        for (priority, _, geom, col_arrays, row_idx) in heap
+        for (priority, _, geom, col_arrays, row_idx) in list(heap) + list(cells.values())
     ]
 
 

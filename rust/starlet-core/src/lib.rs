@@ -202,6 +202,49 @@ impl PyDataset {
         d.set_item("features", st.features)?;
         Ok(d)
     }
+
+    /// Records whose geometry intersects the lon/lat box `(minx, miny, maxx,
+    /// maxy)`, as a list of dicts `{"bbox": [..], "type": "Point|LineString|
+    /// Polygon", "properties": {...}}` — the "click on a record" lookup.
+    #[pyo3(signature = (minx, miny, maxx, maxy, limit = 50))]
+    fn query<'py>(
+        &self,
+        py: Python<'py>,
+        minx: f64,
+        miny: f64,
+        maxx: f64,
+        maxy: f64,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+        let inner = self.inner.clone();
+        let q = [minx.min(maxx), miny.min(maxy), minx.max(maxx), miny.max(maxy)];
+        let hits = py.allow_threads(move || inner.query(&q, limit)).map_err(to_py_err)?;
+        let mut out = Vec::with_capacity(hits.len());
+        for h in hits {
+            let d = pyo3::types::PyDict::new(py);
+            d.set_item("bbox", h.bbox.to_vec())?;
+            d.set_item(
+                "type",
+                match h.kind {
+                    geom::GeomKind::Point => "Point",
+                    geom::GeomKind::Line => "LineString",
+                    geom::GeomKind::Polygon => "Polygon",
+                },
+            )?;
+            let props = pyo3::types::PyDict::new(py);
+            for (k, v) in h.attrs {
+                match v {
+                    mvt::Value::Str(s) => props.set_item(k, s)?,
+                    mvt::Value::F64(f) => props.set_item(k, f)?,
+                    mvt::Value::I64(i) => props.set_item(k, i)?,
+                    mvt::Value::Bool(b) => props.set_item(k, b)?,
+                }
+            }
+            d.set_item("properties", props)?;
+            out.push(d);
+        }
+        Ok(out)
+    }
 }
 
 /// Number of worker threads rayon will use.
