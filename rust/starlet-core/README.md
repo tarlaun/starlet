@@ -55,11 +55,21 @@ zero-allocation WKB scan on first touch and cached with the row group. That path
 is slower on wide tiles over big partitions — re-tile with `--covering-bbox`
 for the fast path.
 
-**Batch pyramid** (`Dataset.write_tiles(outdir, tiles)`): the tile set is the
+**Batch pyramid** (`Dataset.write_pyramid(outdir, tiles)`): the tile set is the
 same one the Python map/reduce produces (tiles passing the histogram/threshold
-filter that end up non-empty); each tile is generated independently as above,
-in parallel, and written to `<z>/<x>/<y>.mvt` from Rust. No intermediate files,
-no reduce stage, no temp disk.
+filter that end up non-empty), for every requested zoom in one call. It runs
+in *push mode* with bounded memory (`src/pyramid.rs`): pass 1 streams every
+row group once (geometry + bbox columns only) and pushes a 12-byte
+`(crc32, row group, row)` reference into the bounded top-k heap of each tile
+whose buffered bounds the row's bbox intersects, at every zoom; pass 2
+streams the row groups that hold winners, decodes each winning row once and
+appends it to its tiles' layer builders, writing a tile to `<z>/<x>/<y>.mvt`
+the moment its last winner arrives. Each row group is decoded by one worker
+and dropped, so memory is the references plus the tiles still being filled —
+never the decoded dataset. No intermediate files, no reduce stage, no temp
+disk. (`write_tiles` / `generate_tiles`, the per-tile pull-mode batch, remain
+available; they pin every row group a tile touches and are only suitable for
+small tile sets.)
 
 ## Output parity with the Python pipeline
 

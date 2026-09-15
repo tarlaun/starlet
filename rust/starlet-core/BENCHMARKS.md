@@ -92,13 +92,32 @@ pyramid (`STARLET_ENGINE=rust`), wall clock and peak RSS from
 
 The Python map stage materialises every feature into an intermediate tile
 file per zoom before the reduce stage merges them, so its temporary footprint
-grows with features × zoom levels; the Rust path generates each tile directly
-from bbox-pruned row groups and writes only the output. The trade-off is
-memory rather than disk: the Rust engine keeps decoded row groups in an LRU
-(default 256 groups of up to 16k rows), hence its ~2.6 GB RSS on this dataset
-against Python's ~1 GB; `Dataset(path, rg_cache=N)` bounds it. (TileAQP's cluster
-measurement of the same two designs on 10M parks at z12: starlet 1 h 48 min
-with 86 GB of temporaries vs 3 min, 36× — consistent with this.)
+grows with features × zoom levels; the Rust path writes only the output.
+These rows were measured with the first (pull-mode) Rust batch path, whose
+RSS came from pinning decoded row groups per tile; the push-mode path that
+replaced it (next section) needs a fraction of that. Note also that the
+Python RSS column is `/usr/bin/time` on the parent process only — it does
+not sum the multiprocessing workers. (TileAQP's cluster measurement of the
+same two designs on 10M parks at z12: starlet 1 h 48 min with 86 GB of
+temporaries vs 3 min, 36× — consistent with this.)
+
+### Push-mode pyramid (bounded memory) — `osm_parks_full`, 9.96M polygons, ec-hn
+
+The first Rust batch path *pulled* row groups per tile, so a z0 tile pinned
+every decoded row group at once and parallel tiles multiplied it: **33–35 GB
+RSS** on the full parks dataset. `write_pyramid` now streams the row groups
+twice (per-tile top-k *references* first, then one decode of each winning
+row), writing a tile the moment its last winner lands. Measured on ec-hn
+(16-core Xeon, 125 GB), `feature_capacity` 25,000, output identical per tile:
+
+| zoom range | pull-mode (per-tile) | push-mode (streaming) | tiles | output |
+|---|---|---|---:|---:|
+| z0–9 | 171 s, **34.7 GB** RSS | **42 s, 4.95 GB** RSS | 35,112 (same set; 63/63 sampled tiles identical) | 2.6 GB |
+| z0–12 | not run (memory) | **227 s, 7.0 GB** RSS | 743,927 | 8.4 GB |
+| TIGER z0–7 (laptop) | 1.63 s | **0.78 s**, 0.5 GB RSS | 548 (identical) | — |
+
+For reference, starlet's Python map/reduce needed 34 min (v0.4.0, z0–19,
+threshold 50k) on the same input, and its earlier version 5 h 43 min at z7.
 
 ### `TIGER2018_COUNTY` — 3,233 counties, z0–7 (both complete)
 
