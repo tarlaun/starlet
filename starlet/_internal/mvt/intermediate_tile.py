@@ -40,7 +40,7 @@ import mapbox_vector_tile
 import pyarrow as pa
 import shapely
 from shapely.affinity import affine_transform
-from shapely.geometry import LineString, Point, box
+from shapely.geometry import LineString, Point, Polygon
 
 from starlet._internal.mvt.pyramid_partitioner import PyramidPartitioner
 
@@ -258,7 +258,10 @@ class IntermediateVectorTile:
             kind = _base_kind(geometry)
             h = self.cell * 0.5
             if kind == "Polygon":
-                return [box(cx - h, cy - h, cx + h, cy + h)], True
+                # same vertex order as the Rust engine (byte-identical tiles)
+                # (tile units here are y-up; the Rust engine's are y-down, hence the mirrored order)
+                square = Polygon([(cx - h, cy + h), (cx + h, cy + h), (cx + h, cy - h), (cx - h, cy - h), (cx - h, cy + h)])
+                return [square], True
             if kind == "LineString":
                 return [LineString([(cx - h, cy), (cx + h, cy)])], True
             return [Point(cx, cy)], False
