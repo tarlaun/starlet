@@ -85,7 +85,7 @@ pyramid (`STARLET_ENGINE=rust`), wall clock and peak RSS from
 
 | max zoom | Python map/reduce | Rust | tiles | output |
 |---:|---|---|---:|---:|
-| 6 | _see below_ | | | |
+| 6 | **79.4 s**, 0.96 GB RSS, **6.7 GB** peak temp files | **5.1 s** (15.7×), 2.7 GB RSS, no temp files | 830 (identical per-zoom counts) | 88 MB |
 | 8 | **killed** — spilled **9.5 GB** of temporary intermediate files and exhausted the disk before writing a tile | **7.7 s**, 2.6 GB RSS, no temp files | 6,630 | 380 MB |
 | 10 | **killed** — >10 GB of temporary files, 0 tiles written after several minutes | **15.3 s**, 2.6 GB RSS | 47,626 | 994 MB |
 | 12 | not attempted (would need more scratch disk than the laptop has) | **51.7 s**, 3.1 GB RSS | 344,722 | 2.5 GB |
@@ -93,7 +93,10 @@ pyramid (`STARLET_ENGINE=rust`), wall clock and peak RSS from
 The Python map stage materialises every feature into an intermediate tile
 file per zoom before the reduce stage merges them, so its temporary footprint
 grows with features × zoom levels; the Rust path generates each tile directly
-from bbox-pruned row groups and writes only the output. (TileAQP's cluster
+from bbox-pruned row groups and writes only the output. The trade-off is
+memory rather than disk: the Rust engine keeps decoded row groups in an LRU
+(default 256 groups of up to 16k rows), hence its ~2.6 GB RSS on this dataset
+against Python's ~1 GB; `Dataset(path, rg_cache=N)` bounds it. (TileAQP's cluster
 measurement of the same two designs on 10M parks at z12: starlet 1 h 48 min
 with 86 GB of temporaries vs 3 min, 36× — consistent with this.)
 
