@@ -143,6 +143,11 @@ class DatasetMVTGenerator:
         if not self.hist_path.exists():
             raise FileNotFoundError(f"Prefix histogram not found: {self.hist_path}")
 
+        from starlet._internal.mvt import rust_engine
+
+        if rust_engine.batch_enabled() and _rust_supports_dataset(str(self.dataset_dir)):
+            return self._run_rust_pyramid()
+
         source = GeoParquetSource(str(self.parquet_dir), geom_col=self.geom_col)
         map_groups = _create_map_groups(source, self.workers)
         if not map_groups:
@@ -174,6 +179,71 @@ class DatasetMVTGenerator:
             zoom_levels=zoom_levels,
             tile_counts_by_zoom=tile_counts_by_zoom,
             pmtiles_path=pmtiles_path,
+        )
+
+    def _run_rust_pyramid(self) -> DatasetMVTGenerationResult:
+        """Pull-based pyramid on the Rust engine (``STARLET_ENGINE=rust``).
+
+        The tile *set* is the same as the map/reduce path's: every tile that
+        passes the histogram/threshold filter and ends up with at least one
+        feature. Each tile is generated independently from bbox-pruned row
+        groups (top-k by ``crc32(WKB)``, like the Python pipeline), in
+        parallel across all cores, and written straight to ``<z>/<x>/<y>.mvt``
+        from Rust; no intermediate files, no reduce stage.
+        """
+        from starlet._internal.mvt import rust_engine
+
+        prefix = HistogramLoader(str(self.hist_path)).load()
+        partitioner = PyramidPartitioner(
+            (WORLD_MINX, WORLD_MINY, WORLD_MAXX, WORLD_MAXY),
+            self.num_zoom_levels,
+            prefix_histogram=prefix,
+            size_threshold=self.threshold,
+            buffer=self.partition_buffer,
+        )
+        # Quadtree walk: histogram mass is monotone, so a tile that fails the
+        # filter has no descendant that passes it.
+        tiles_by_zoom: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
+        stack: list[tuple[int, int, int]] = [(0, 0, 0)]
+        while stack:
+            z, x, y = stack.pop()
+            if not partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(z, x, y), z, x, y):
+                continue
+            tiles_by_zoom[z].append((z, x, y))
+            if z < partitioner.max_zoom:
+                stack.extend(((z + 1, 2 * x, 2 * y), (z + 1, 2 * x + 1, 2 * y),
+                              (z + 1, 2 * x, 2 * y + 1), (z + 1, 2 * x + 1, 2 * y + 1)))
+
+        ds = rust_engine.dataset(self.dataset_dir)
+        self.outdir.mkdir(parents=True, exist_ok=True)
+        chunk = 4096
+        written = 0
+        for z in sorted(tiles_by_zoom):
+            tiles = tiles_by_zoom[z]
+            n = 0
+            for i in range(0, len(tiles), chunk):
+                n += ds.write_tiles(
+                    str(self.outdir), tiles[i:i + chunk],
+                    feature_capacity=self.feature_capacity, extent=self.extent, buffer=self.buffer,
+                )
+            written += n
+            logger.info("DatasetMVTGenerator[rust] z=%d candidates=%d written=%d", z, len(tiles), n)
+
+        tile_counts_by_zoom = _discover_tile_counts_by_zoom(self.outdir)
+        zoom_levels = [z for z, count in enumerate(tile_counts_by_zoom) if count > 0]
+        tile_count = sum(tile_counts_by_zoom)
+        pmtiles_path = None
+        if self.output_format == "pmtiles":
+            pmtiles_path = str(self.pmtiles_path)
+            export_to_pmtiles(
+                mvt_dir=str(self.outdir), output_path=pmtiles_path,
+                tile_type="mvt", compression=self.pmtiles_compression,
+            )
+            if self.outdir.exists():
+                shutil.rmtree(self.outdir)
+        return DatasetMVTGenerationResult(
+            outdir=str(self.outdir), tile_count=tile_count, zoom_levels=zoom_levels,
+            tile_counts_by_zoom=tile_counts_by_zoom, pmtiles_path=pmtiles_path,
         )
 
     def _run_map_stage(
@@ -371,6 +441,35 @@ def _intermediate_tile_filename(z: int, x: int, y: int) -> str:
     return f"{z}-{x}-{y}.pyarrow"
 
 
+_RUST_DATASET_OK: dict[str, bool] = {}
+
+
+def _rust_supports_dataset(dataset_path: str) -> bool:
+    """The Rust engine reads lon/lat (EPSG:4326) partitions; anything else stays on Python."""
+    key = str(Path(dataset_path).resolve())
+    ok = _RUST_DATASET_OK.get(key)
+    if ok is None:
+        ok = False
+        try:
+            files = sorted((Path(dataset_path) / "parquet_tiles").glob("*.parquet"))
+            if files:
+                from starlet._internal.tiling.crs import geoparquet_crs
+
+                schema = pq.ParquetFile(files[0]).schema_arrow
+                geom_col = "geometry" if "geometry" in schema.names else schema.names[-1]
+                crs = geoparquet_crs(schema, geom_col)
+                if crs is None:
+                    ok = True
+                else:
+                    from pyproj import CRS
+
+                    ok = CRS.from_user_input(crs).equals(CRS.from_epsg(4326), ignore_axis_order=True)
+        except Exception:
+            ok = False
+        _RUST_DATASET_OK[key] = ok
+    return ok
+
+
 def generate_single_mvt_tile(
     dataset_path: str,
     tile_id: tuple[int, int, int],
@@ -380,7 +479,49 @@ def generate_single_mvt_tile(
     buffer: int | None = None,
     layer_name: str = "layer0",
 ) -> bytes:
-    """Generate one MVT tile directly from an indexed Starlet dataset."""
+    """Generate one MVT tile directly from an indexed Starlet dataset.
+
+    Uses the optional Rust extension (``starlet_core``) when it is installed
+    and the dataset is EPSG:4326, and falls back to the pure-Python pipeline
+    otherwise — see :mod:`starlet._internal.mvt.rust_engine`.
+    """
+    feature_capacity = int(
+        feature_capacity if feature_capacity is not None else config_value("mvt", "feature_capacity")
+    )
+    extent = int(extent if extent is not None else config_value("mvt", "extent"))
+    buffer = int(buffer if buffer is not None else config_value("mvt", "buffer"))
+    if layer_name == "layer0":
+        from starlet._internal.mvt import rust_engine
+
+        if rust_engine.available() and _rust_supports_dataset(dataset_path):
+            try:
+                z, x, y = tile_id
+                return rust_engine.generate_tile(
+                    dataset_path, z, x, y,
+                    feature_capacity=feature_capacity, extent=extent, buffer=buffer,
+                )
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "starlet_core failed for %s %s; falling back to Python", dataset_path, tile_id, exc_info=True
+                )
+    return _generate_single_mvt_tile_python(
+        dataset_path, tile_id,
+        feature_capacity=feature_capacity, extent=extent, buffer=buffer, layer_name=layer_name,
+    )
+
+
+def _generate_single_mvt_tile_python(
+    dataset_path: str,
+    tile_id: tuple[int, int, int],
+    *,
+    feature_capacity: int | None = None,
+    extent: int | None = None,
+    buffer: int | None = None,
+    layer_name: str = "layer0",
+) -> bytes:
+    """Pure-Python single-tile generation (the reference implementation)."""
     feature_capacity = int(
         feature_capacity if feature_capacity is not None else config_value("mvt", "feature_capacity")
     )
@@ -639,6 +780,11 @@ def _positive_bounds_tuple(bounds: tuple[float, float, float, float]) -> tuple[f
 
 
 def _property_value(value: Any) -> Any:
+    # numpy scalars (from ``Series.to_numpy()`` in the legacy path) are not
+    # instances of the Python builtins: ``np.int64`` would otherwise be
+    # stringified, breaking numeric styling on on-demand tiles.
+    if isinstance(value, np.generic):
+        value = value.item()
     if isinstance(value, (str, int, float, bool)):
         return value
     return str(value)

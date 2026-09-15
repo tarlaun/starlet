@@ -135,6 +135,42 @@ three places:
 Document it in the README's option table (if user-facing) and in
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
+## Rust acceleration core (optional)
+
+`rust/starlet-core/` is a PyO3/maturin extension (`starlet_core`) that
+generates vector tiles straight from a dataset's `parquet_tiles/` with
+starlet's own selection semantics — using all cores and releasing the GIL. It
+is adapted from the [TileAQP](https://github.com/) Rust port of starlet's MVT
+pipeline (WKB parsing, Web-Mercator tile math, clipping, simplification and
+a hand-written MVT encoder) with starlet's `crc32(WKB)` top-k selection and
+5.5 px collapse rule on top, so its output matches the Python pipeline.
+
+starlet detects it at import (`starlet/_internal/mvt/rust_engine.py`) and
+uses it for on-the-fly tiles (`generate_single_mvt_tile`, hence `starlet
+serve`); batch pyramid generation switches to it with `STARLET_ENGINE=rust`.
+Everything falls back to Python when it is absent — pure-Python installs are
+unaffected.
+
+```bash
+# once: Rust toolchain from https://rustup.rs, then
+pip install maturin
+cd rust/starlet-core && maturin develop --release    # builds + installs into the venv
+cargo test --release                                  # Rust unit tests
+pytest tests/test_mvt/test_rust_engine.py             # Python-vs-Rust parity (skips if not built)
+```
+
+`STARLET_ENGINE=auto|rust|python` selects the engine (`python` is the kill
+switch). Design notes, parity results, limitations and the benchmark method
+are in [rust/starlet-core/README.md](rust/starlet-core/README.md) and
+[rust/starlet-core/BENCHMARKS.md](rust/starlet-core/BENCHMARKS.md).
+
+Performance knobs worth knowing: on-demand tiles are fastest on datasets tiled
+with `--covering-bbox` (the default) because row groups are pruned by the
+`_bbox_*` statistics; the first tile that touches a row group pays its decode
+(~100 ms for a 16k-row group at deep zoom, then ~1 ms from the row-group LRU),
+so `DEFAULT_ROW_GROUP_SIZE` in `writer_pool.py` trades footer size for
+first-touch latency.
+
 ## Packaging
 
 `pyproject.toml` uses setuptools. Package data includes the server templates and

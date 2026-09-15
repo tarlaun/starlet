@@ -122,6 +122,11 @@ PMTiles archive or `.mvt` files on disk, then generated on the fly from the
 Parquet tiles when you zoom past the pre-built levels — so you can serve a
 dataset even without pre-generating every zoom.
 
+An optional Rust core (`starlet_core`, in `rust/starlet-core`) makes on-the-fly
+tiles and batch pyramid generation many times faster and lets you zoom
+interactively to level 20 on large datasets; starlet uses it automatically when
+it is installed. See [DEVELOPMENT.md](DEVELOPMENT.md#rust-acceleration-core-optional).
+
 ## Configuration
 
 Settings you reuse often (partition size, zoom, worker count, …) can live in a

@@ -1,0 +1,30 @@
+[package]
+name = "starlet-core"
+version = "0.1.0"
+edition = "2021"
+description = "Rust acceleration core for starlet: on-the-fly vector tiles and parallel pyramid generation"
+license = "MIT"
+
+[lib]
+name = "starlet_core"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Enabled by maturin (see pyproject.toml); left off for `cargo test` so test
+# binaries can link against libpython.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["abi3-py310"] }
+anyhow = "1"
+arrow = "55"
+parquet = { version = "55", features = ["arrow"] }
+rayon = "1"
+crc32fast = "1"
+lru = "0.13"
+parking_lot = "0.12"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"

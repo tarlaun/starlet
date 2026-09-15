@@ -54,3 +54,6 @@ bench_scratch/
 HANDOFF.md
 pyvenv.cfg
 .claude/worktrees/
+
+# Rust extension build artifacts
+rust/starlet-core/target/
