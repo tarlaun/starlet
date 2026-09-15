@@ -85,6 +85,9 @@ pub struct Params {
     pub extent: u32,
     pub buffer: u32,
     pub attrs: AttrPolicy,
+    /// Douglas-Peucker tolerance in tile units; `None` = a quarter of a
+    /// display pixel (`cell() / 4`, i.e. 4 units at the default extent).
+    pub simplify_tolerance: Option<f64>,
 }
 
 impl Params {
@@ -92,6 +95,10 @@ impl Params {
     #[inline]
     pub fn cell(&self) -> f64 {
         self.extent as f64 / PIXEL_GRID as f64
+    }
+    #[inline]
+    pub fn tolerance(&self) -> f64 {
+        self.simplify_tolerance.unwrap_or(self.cell() * 0.25).max(0.0)
     }
 }
 
@@ -698,9 +705,9 @@ pub fn to_tile_geometry(g_merc: &Geometry, tt: &TileTransform, p: &Params, as_do
             ),
         });
     }
-    // simplify at 1 tile unit when the geometry is "big enough"
+    // simplify when the geometry is "big enough"
     if g.vertex_count() > SIMPLIFY_MIN_COORDS && g.kind != GeomKind::Point {
-        g = simplify_dp(&g, 1.0)?;
+        g = simplify_dp(&g, p.tolerance())?;
     }
     // clip (points are not clipped by starlet)
     if g.kind != GeomKind::Point {
@@ -768,7 +775,7 @@ mod tests {
 
     #[test]
     fn sub_pixel_polygon_becomes_one_pixel_square_without_attributes() {
-        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256, attrs: AttrPolicy::All };
+        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256, attrs: AttrPolicy::All, simplify_tolerance: None };
         let tt = TileTransform::new(TileId::new(0, 0, 0), 4096, 256);
         // a 1 m square near the origin: far below one pixel at z0
         let (x, y) = lonlat_to_merc(10.0, 45.0);
@@ -789,7 +796,7 @@ mod tests {
 
     #[test]
     fn native_points_are_never_dots() {
-        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256, attrs: AttrPolicy::All };
+        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256, attrs: AttrPolicy::All, simplify_tolerance: None };
         let tt = TileTransform::new(TileId::new(0, 0, 0), 4096, 256);
         let (x, y) = lonlat_to_merc(10.0, 45.0);
         let pt = Geometry { kind: GeomKind::Point, parts: vec![vec![[x, y]]], polys: vec![] };

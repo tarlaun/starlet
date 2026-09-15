@@ -51,11 +51,17 @@ kept, so the tile shows every occupied pixel with a bounded feature count;
 larger candidates are ranked by the same priority and the top
 `feature_capacity` kept. The priority is geometry-intrinsic, so adjacent
 on-demand and pre-generated tiles agree on what they keep. Winners go through
-starlet's pipeline: affine to tile units; a sub-pixel polygon / line becomes a
-one-pixel square / segment of its own type (a *dot*, no attributes); larger
-shapes get Douglas-Peucker at 1 tile unit (>10 vertices), clipping to
-extent+buffer, and their attributes (subject to the tile-attributes policy);
-encode. Decoded row groups live in an LRU shared across tiles.
+starlet's pipeline: affine to tile units; the `feature_capacity` biggest
+shapes (priority = size, then hash) get Douglas-Peucker at 1 tile unit
+(>10 vertices), clipping to extent+buffer, and their attributes (subject to
+the tile-attributes policy, `--tile-attributes all|none|<columns>`); every
+other polygon / line — sub-pixel ones and the ones that did not make the cut —
+becomes a one-pixel square / segment of its own type (a *dot*, no
+attributes). All the dots of a tile are packed into one MultiPolygon and one
+MultiLineString feature, sorted by position, which costs ~7 bytes per dot
+instead of ~17. Attributes of any record, dot or not, come from
+`Dataset.query(minx, miny, maxx, maxy)` (the viewer's click lookup). Decoded
+row groups live in an LRU shared across tiles.
 
 Datasets **without** bbox columns still work: per-row bboxes are computed by a
 zero-allocation WKB scan on first touch and cached with the row group. That path

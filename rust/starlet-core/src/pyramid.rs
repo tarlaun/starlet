@@ -488,7 +488,7 @@ mod tests {
     fn slots_for_covers_buffer_zone() {
         // two z1 tiles; a point just left of the x=0 meridian must land in
         // the right tile too, because of the buffer.
-        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256, attrs: crate::tiler::AttrPolicy::All };
+        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256, attrs: crate::tiler::AttrPolicy::All, simplify_tolerance: None };
         let tiles = [TileId::new(1, 0, 0), TileId::new(1, 1, 0)];
         let w = Wanted::new(&tiles, &p);
         let mut out = Vec::new();

@@ -32,7 +32,12 @@ from starlet._internal.mvt.helpers import (
     WORLD_MINY,
     mercator_tile_bounds,
 )
-from starlet._internal.mvt.intermediate_tile import IntermediateVectorTile, feature_priority, normalize_tile_attributes
+from starlet._internal.mvt.intermediate_tile import (
+    IntermediateVectorTile,
+    feature_priority,
+    normalize_simplify_tolerance,
+    normalize_tile_attributes,
+)
 from starlet._internal.mvt.pyramid_partitioner import PyramidPartitioner
 from starlet._internal.pmtiles.paths import default_pmtiles_path
 from starlet._internal.pmtiles.exporter import export_to_pmtiles
@@ -113,6 +118,7 @@ class DatasetMVTGenerator:
         self.tile_attributes = normalize_tile_attributes(
             tile_attributes if tile_attributes is not None else config_value("mvt", "tile_attributes")
         )
+        self.simplify_tolerance = config_value("mvt", "simplify_tolerance")
         self.parquet_dir = self.dataset_dir / "parquet_tiles"
         self.hist_path = self.dataset_dir / "histograms" / "global_prefix.npy"
         self.num_zoom_levels = int(num_zoom_levels)
@@ -237,6 +243,7 @@ class DatasetMVTGenerator:
                 str(self.outdir), tiles,
                 feature_capacity=self.feature_capacity, extent=self.extent, buffer=self.buffer,
                 tile_attributes=self.tile_attributes,
+                simplify_tolerance=_tolerance_arg(self.simplify_tolerance, self.extent),
             )
             logger.info(
                 "DatasetMVTGenerator[rust] zooms=%s requested=%d written=%d candidates=%d features=%d",
@@ -324,6 +331,7 @@ class DatasetMVTGenerator:
                     self.extent,
                     self.buffer,
                     self.tile_attributes,
+                    self.simplify_tolerance,
                 )
                 for group in reduce_groups
                 if group
@@ -410,6 +418,7 @@ def _reduce_tile_group(
     extent: int,
     buffer: int,
     tile_attributes: list[str] | None = None,
+    simplify_tolerance: Any = None,
 ) -> None:
     out_path = Path(outdir)
     for reduce_input in reduce_inputs:
@@ -425,6 +434,7 @@ def _reduce_tile_group(
             buffer=buffer,
             rng=random.Random(tile_id),
             tile_attributes=tile_attributes,
+            simplify_tolerance=simplify_tolerance,
         )
         first_tile = True
         for intermediate_dir in reduce_input.intermediate_dirs:
@@ -522,6 +532,7 @@ def generate_single_mvt_tile(
                     dataset_path, z, x, y,
                     feature_capacity=feature_capacity, extent=extent, buffer=buffer,
                     tile_attributes=tile_attributes,
+                    simplify_tolerance=_tolerance_arg(config_value("mvt", "simplify_tolerance"), extent),
                 )
             except Exception:
                 import logging
@@ -534,6 +545,13 @@ def generate_single_mvt_tile(
         feature_capacity=feature_capacity, extent=extent, buffer=buffer, layer_name=layer_name,
         tile_attributes=tile_attributes,
     )
+
+
+def _tolerance_arg(value: Any, extent: int) -> float | None:
+    """Config ``mvt.simplify_tolerance`` -> the Rust engine's argument (None = auto)."""
+    if value is None or (isinstance(value, str) and value.strip().lower() in ("", "auto")):
+        return None
+    return float(value)
 
 
 def _generate_single_mvt_tile_python(
@@ -571,6 +589,7 @@ def _generate_single_mvt_tile_python(
         extent=extent,
         buffer=buffer,
         tile_attributes=tile_attributes,
+        simplify_tolerance=config_value("mvt", "simplify_tolerance"),
     )
 
     sampled_features = _sample_single_tile_records(

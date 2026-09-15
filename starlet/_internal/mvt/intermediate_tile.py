@@ -83,10 +83,12 @@ class IntermediateVectorTile:
         buffer: int = 256,
         rng: random.Random | None = None,
         tile_attributes: Any = None,
+        simplify_tolerance: Any = None,
     ) -> None:
         self.z = int(z)
         # None = every attribute; a list = only those columns ([] = none)
         self.tile_attributes = normalize_tile_attributes(tile_attributes)
+        self._simplify_tolerance = simplify_tolerance
         self.x = int(x)
         self.y = int(y)
         self.feature_capacity = max(1, int(feature_capacity))
@@ -118,6 +120,8 @@ class IntermediateVectorTile:
         # features and larger ones that did not make the top-k.
         self._cells: dict[tuple[int, int], tuple[int, int, _TileFeature]] = {}
         self.cell = self.extent / PIXEL_GRID
+        # Douglas-Peucker tolerance in tile units; "auto"/None = a quarter of a display pixel
+        self.simplify_tolerance = normalize_simplify_tolerance(self._simplify_tolerance, self.cell)
         self._seq = 0
         self._features_seen = 0
 
@@ -266,9 +270,9 @@ class IntermediateVectorTile:
                 return [LineString([(cx - h, cy), (cx + h, cy)])], True
             return [Point(cx, cy)], False
 
-        # Simplify the geometry to reduce the number of coordinates. Use tolerance of one pixel.
+        # Simplify the geometry to reduce the number of coordinates.
         if shapely.count_coordinates(geometry) > 10:
-            geometry = shapely.simplify(geometry, 1.0, preserve_topology=False)
+            geometry = shapely.simplify(geometry, self.simplify_tolerance, preserve_topology=False)
         if geometry.geom_type not in {"Point", "MultiPoint"}:
             geometry = shapely.clip_by_rect(
                 geometry,
@@ -432,6 +436,13 @@ class IntermediateVectorTile:
         if self.tile_attributes is None:
             return dict(properties)
         return {k: v for k, v in properties.items() if k in self.tile_attributes}
+
+
+def normalize_simplify_tolerance(value: Any, cell: float) -> float:
+    """``"auto"``/``None`` -> a quarter of a display pixel; else a float in tile units."""
+    if value is None or (isinstance(value, str) and value.strip().lower() in ("", "auto")):
+        return cell * 0.25
+    return max(0.0, float(value))
 
 
 def normalize_tile_attributes(value: Any) -> list[str] | None:

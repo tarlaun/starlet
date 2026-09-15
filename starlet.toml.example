@@ -57,7 +57,11 @@ threshold = 0
 pmtiles = false
 
 # Maximum retained features per intermediate tile reservoir.
-feature_capacity = 25000
+feature_capacity = 10000
+# Attribute columns written into tiles: "all", "none", or "name,class"
+tile_attributes = "all"
+# Douglas-Peucker tolerance in tile units; "auto" = a quarter of a display pixel
+simplify_tolerance = "auto"
 
 # Vector tile extent.
 extent = 4096

@@ -57,7 +57,7 @@ impl PyDataset {
     }
 
     /// Generate one tile; returns the MVT bytes. Releases the GIL.
-    #[pyo3(signature = (z, x, y, feature_capacity = 10000, extent = 4096, buffer = 256, tile_attributes = None))]
+    #[pyo3(signature = (z, x, y, feature_capacity = 10000, extent = 4096, buffer = 256, tile_attributes = None, simplify_tolerance = None))]
     fn generate_tile<'py>(
         &self,
         py: Python<'py>,
@@ -68,9 +68,10 @@ impl PyDataset {
         extent: u32,
         buffer: u32,
         tile_attributes: Option<Vec<String>>,
+        simplify_tolerance: Option<f64>,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let inner = self.inner.clone();
-        let p = Params { feature_capacity, extent, buffer, attrs: AttrPolicy::from_option(tile_attributes) };
+        let p = Params { feature_capacity, extent, buffer, attrs: AttrPolicy::from_option(tile_attributes), simplify_tolerance };
         let bytes = py
             .allow_threads(move || inner.generate(TileId::new(z, x, y), &p))
             .map_err(to_py_err)?;
@@ -78,7 +79,7 @@ impl PyDataset {
     }
 
     /// Generate one tile and return `(bytes, stats_dict)` for diagnostics.
-    #[pyo3(signature = (z, x, y, feature_capacity = 10000, extent = 4096, buffer = 256, tile_attributes = None))]
+    #[pyo3(signature = (z, x, y, feature_capacity = 10000, extent = 4096, buffer = 256, tile_attributes = None, simplify_tolerance = None))]
     fn generate_tile_with_stats<'py>(
         &self,
         py: Python<'py>,
@@ -89,9 +90,10 @@ impl PyDataset {
         extent: u32,
         buffer: u32,
         tile_attributes: Option<Vec<String>>,
+        simplify_tolerance: Option<f64>,
     ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, pyo3::types::PyDict>)> {
         let inner = self.inner.clone();
-        let p = Params { feature_capacity, extent, buffer, attrs: AttrPolicy::from_option(tile_attributes) };
+        let p = Params { feature_capacity, extent, buffer, attrs: AttrPolicy::from_option(tile_attributes), simplify_tolerance };
         let (bytes, st) = py
             .allow_threads(move || inner.generate_with_stats(TileId::new(z, x, y), &p))
             .map_err(to_py_err)?;
@@ -107,7 +109,7 @@ impl PyDataset {
 
     /// Generate many tiles in parallel (rayon, GIL released). Returns a list
     /// aligned with `tiles`: MVT bytes, or `None` for tiles with no features.
-    #[pyo3(signature = (tiles, feature_capacity = 10000, extent = 4096, buffer = 256, tile_attributes = None))]
+    #[pyo3(signature = (tiles, feature_capacity = 10000, extent = 4096, buffer = 256, tile_attributes = None, simplify_tolerance = None))]
     fn generate_tiles<'py>(
         &self,
         py: Python<'py>,
@@ -116,9 +118,10 @@ impl PyDataset {
         extent: u32,
         buffer: u32,
         tile_attributes: Option<Vec<String>>,
+        simplify_tolerance: Option<f64>,
     ) -> PyResult<Vec<Option<Bound<'py, PyBytes>>>> {
         let inner = self.inner.clone();
-        let p = Params { feature_capacity, extent, buffer, attrs: AttrPolicy::from_option(tile_attributes) };
+        let p = Params { feature_capacity, extent, buffer, attrs: AttrPolicy::from_option(tile_attributes), simplify_tolerance };
         let results: Vec<anyhow::Result<(Vec<u8>, u64)>> = py.allow_threads(move || {
             tiles
                 .par_iter()
@@ -137,7 +140,7 @@ impl PyDataset {
     /// Generate many tiles in parallel and write each non-empty one to
     /// `<outdir>/<z>/<x>/<y>.mvt` (starlet's layout). Nothing crosses the GIL
     /// but the count of tiles written. Returns that count.
-    #[pyo3(signature = (outdir, tiles, feature_capacity = 10000, extent = 4096, buffer = 256, tile_attributes = None))]
+    #[pyo3(signature = (outdir, tiles, feature_capacity = 10000, extent = 4096, buffer = 256, tile_attributes = None, simplify_tolerance = None))]
     fn write_tiles(
         &self,
         py: Python<'_>,
@@ -147,9 +150,10 @@ impl PyDataset {
         extent: u32,
         buffer: u32,
         tile_attributes: Option<Vec<String>>,
+        simplify_tolerance: Option<f64>,
     ) -> PyResult<usize> {
         let inner = self.inner.clone();
-        let p = Params { feature_capacity, extent, buffer, attrs: AttrPolicy::from_option(tile_attributes) };
+        let p = Params { feature_capacity, extent, buffer, attrs: AttrPolicy::from_option(tile_attributes), simplify_tolerance };
         let out = std::path::PathBuf::from(outdir);
         let written: anyhow::Result<usize> = py.allow_threads(move || {
             let counts: Vec<anyhow::Result<usize>> = tiles
@@ -179,7 +183,7 @@ impl PyDataset {
     /// writing each non-empty tile to `<outdir>/<z>/<x>/<y>.mvt` as soon as
     /// it is complete. Returns a stats dict (`tiles_written`, `candidates`,
     /// `features`, `row_groups`, `tiles_requested`). Releases the GIL.
-    #[pyo3(signature = (outdir, tiles, feature_capacity = 10000, extent = 4096, buffer = 256, tile_attributes = None))]
+    #[pyo3(signature = (outdir, tiles, feature_capacity = 10000, extent = 4096, buffer = 256, tile_attributes = None, simplify_tolerance = None))]
     fn write_pyramid<'py>(
         &self,
         py: Python<'py>,
@@ -189,9 +193,10 @@ impl PyDataset {
         extent: u32,
         buffer: u32,
         tile_attributes: Option<Vec<String>>,
+        simplify_tolerance: Option<f64>,
     ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let inner = self.inner.clone();
-        let p = Params { feature_capacity, extent, buffer, attrs: AttrPolicy::from_option(tile_attributes) };
+        let p = Params { feature_capacity, extent, buffer, attrs: AttrPolicy::from_option(tile_attributes), simplify_tolerance };
         let out = std::path::PathBuf::from(outdir);
         let st = py
             .allow_threads(move || {

@@ -104,11 +104,12 @@ def generate_tile(
     extent: int,
     buffer: int,
     tile_attributes: list[str] | None = None,
+    simplify_tolerance: float | None = None,
 ) -> bytes:
     return dataset(path).generate_tile(
         int(z), int(x), int(y),
         feature_capacity=int(feature_capacity), extent=int(extent), buffer=int(buffer),
-        tile_attributes=tile_attributes,
+        tile_attributes=tile_attributes, simplify_tolerance=simplify_tolerance,
     )
 
 
