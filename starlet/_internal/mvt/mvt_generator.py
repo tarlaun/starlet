@@ -32,7 +32,7 @@ from starlet._internal.mvt.helpers import (
     WORLD_MINY,
     mercator_tile_bounds,
 )
-from starlet._internal.mvt.intermediate_tile import IntermediateVectorTile, feature_priority
+from starlet._internal.mvt.intermediate_tile import IntermediateVectorTile, feature_priority, normalize_tile_attributes
 from starlet._internal.mvt.pyramid_partitioner import PyramidPartitioner
 from starlet._internal.pmtiles.paths import default_pmtiles_path
 from starlet._internal.pmtiles.exporter import export_to_pmtiles
@@ -107,8 +107,12 @@ class DatasetMVTGenerator:
         geom_col: str = "geometry",
         seed: int = 42,
         temp_dir: str | None = None,
+        tile_attributes: Any = None,
     ) -> None:
         self.dataset_dir = Path(dataset_dir)
+        self.tile_attributes = normalize_tile_attributes(
+            tile_attributes if tile_attributes is not None else config_value("mvt", "tile_attributes")
+        )
         self.parquet_dir = self.dataset_dir / "parquet_tiles"
         self.hist_path = self.dataset_dir / "histograms" / "global_prefix.npy"
         self.num_zoom_levels = int(num_zoom_levels)
@@ -232,6 +236,7 @@ class DatasetMVTGenerator:
             st = ds.write_pyramid(
                 str(self.outdir), tiles,
                 feature_capacity=self.feature_capacity, extent=self.extent, buffer=self.buffer,
+                tile_attributes=self.tile_attributes,
             )
             logger.info(
                 "DatasetMVTGenerator[rust] zooms=%s requested=%d written=%d candidates=%d features=%d",
@@ -318,6 +323,7 @@ class DatasetMVTGenerator:
                     self.feature_capacity,
                     self.extent,
                     self.buffer,
+                    self.tile_attributes,
                 )
                 for group in reduce_groups
                 if group
@@ -403,6 +409,7 @@ def _reduce_tile_group(
     feature_capacity: int,
     extent: int,
     buffer: int,
+    tile_attributes: list[str] | None = None,
 ) -> None:
     out_path = Path(outdir)
     for reduce_input in reduce_inputs:
@@ -417,6 +424,7 @@ def _reduce_tile_group(
             extent=extent,
             buffer=buffer,
             rng=random.Random(tile_id),
+            tile_attributes=tile_attributes,
         )
         first_tile = True
         for intermediate_dir in reduce_input.intermediate_dirs:
@@ -488,6 +496,7 @@ def generate_single_mvt_tile(
     extent: int | None = None,
     buffer: int | None = None,
     layer_name: str = "layer0",
+    tile_attributes: Any = None,
 ) -> bytes:
     """Generate one MVT tile directly from an indexed Starlet dataset.
 
@@ -500,6 +509,9 @@ def generate_single_mvt_tile(
     )
     extent = int(extent if extent is not None else config_value("mvt", "extent"))
     buffer = int(buffer if buffer is not None else config_value("mvt", "buffer"))
+    tile_attributes = normalize_tile_attributes(
+        tile_attributes if tile_attributes is not None else config_value("mvt", "tile_attributes")
+    )
     if layer_name == "layer0":
         from starlet._internal.mvt import rust_engine
 
@@ -509,6 +521,7 @@ def generate_single_mvt_tile(
                 return rust_engine.generate_tile(
                     dataset_path, z, x, y,
                     feature_capacity=feature_capacity, extent=extent, buffer=buffer,
+                    tile_attributes=tile_attributes,
                 )
             except Exception:
                 import logging
@@ -519,6 +532,7 @@ def generate_single_mvt_tile(
     return _generate_single_mvt_tile_python(
         dataset_path, tile_id,
         feature_capacity=feature_capacity, extent=extent, buffer=buffer, layer_name=layer_name,
+        tile_attributes=tile_attributes,
     )
 
 
@@ -530,6 +544,7 @@ def _generate_single_mvt_tile_python(
     extent: int | None = None,
     buffer: int | None = None,
     layer_name: str = "layer0",
+    tile_attributes: Any = None,
 ) -> bytes:
     """Pure-Python single-tile generation (the reference implementation)."""
     feature_capacity = int(
@@ -555,6 +570,7 @@ def _generate_single_mvt_tile_python(
         feature_capacity=feature_capacity,
         extent=extent,
         buffer=buffer,
+        tile_attributes=tile_attributes,
     )
 
     sampled_features = _sample_single_tile_records(

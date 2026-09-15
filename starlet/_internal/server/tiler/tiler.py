@@ -39,8 +39,14 @@ class VectorTiler:
         extent: int | None = None,
         buffer: int | None = None,
         feature_capacity: int | None = None,
+        tile_attributes: Any = None,
     ) -> None:
+        from starlet._internal.mvt.intermediate_tile import normalize_tile_attributes
+
         self.dataset_root = Path(dataset_root)
+        self.tile_attributes = normalize_tile_attributes(
+            tile_attributes if tile_attributes is not None else config_value("mvt", "tile_attributes")
+        )
         self.mvt_dir = self.dataset_root / "mvt"
         self.pmtiles_path = discover_pmtiles_path(self.dataset_root)
         self.extent = int(extent if extent is not None else config_value("mvt", "extent"))
@@ -127,6 +133,7 @@ class VectorTiler:
             feature_capacity=self.feature_capacity,
             extent=self.extent,
             buffer=self.buffer,
+            tile_attributes=self.tile_attributes,
         )
         _update_output(
             output,

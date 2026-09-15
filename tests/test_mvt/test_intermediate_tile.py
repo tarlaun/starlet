@@ -276,3 +276,14 @@ def test_dense_sub_pixel_points_drop_attributes_beyond_capacity():
     roomy.add_feature(Point(3e6, 0), {"id": 2})
     decoded = mapbox_vector_tile.decode(roomy.encode())["layer0"]["features"]
     assert sorted(f["properties"]["id"] for f in decoded) == [1, 2]
+
+
+def test_tile_attributes_policy_filters_encoded_properties():
+    from starlet._internal.mvt.intermediate_tile import normalize_tile_attributes
+
+    assert normalize_tile_attributes(None) is None and normalize_tile_attributes("all") is None
+    assert normalize_tile_attributes("none") == [] and normalize_tile_attributes("a, b") == ["a", "b"]
+    tile = IntermediateVectorTile(0, 0, 0, feature_capacity=10, tile_attributes="name")
+    tile.add_feature(_big(0), {"id": 1, "name": "x"})
+    decoded = mapbox_vector_tile.decode(tile.encode())["layer0"]["features"]
+    assert decoded[0]["properties"] == {"name": "x"}

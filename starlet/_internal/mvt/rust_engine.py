@@ -103,10 +103,12 @@ def generate_tile(
     feature_capacity: int,
     extent: int,
     buffer: int,
+    tile_attributes: list[str] | None = None,
 ) -> bytes:
     return dataset(path).generate_tile(
         int(z), int(x), int(y),
         feature_capacity=int(feature_capacity), extent=int(extent), buffer=int(buffer),
+        tile_attributes=tile_attributes,
     )
 
 
@@ -117,11 +119,13 @@ def generate_tiles(
     feature_capacity: int,
     extent: int,
     buffer: int,
+    tile_attributes: list[str] | None = None,
 ) -> list[bytes]:
     """Generate many tiles in parallel (GIL released; rayon over all cores)."""
     return dataset(path).generate_tiles(
         [(int(z), int(x), int(y)) for z, x, y in tiles],
         feature_capacity=int(feature_capacity), extent=int(extent), buffer=int(buffer),
+        tile_attributes=tile_attributes,
     )
 
 

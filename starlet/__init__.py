@@ -274,6 +274,7 @@ def generate_mvt(
     feature_capacity: int | None = None,
     extent: int | None = None,
     buffer: int | None = None,
+    tile_attributes: str | list[str] | None = None,
 ) -> MVTResult:
     """Generate Mapbox Vector Tiles from a tiled dataset.
 
@@ -296,6 +297,10 @@ def generate_mvt(
         the process-wide Starlet temp directory when configured, otherwise
         ``<tile_dir>/tmp``.
     feature_capacity : int
+        Maximum features larger than a display pixel kept per tile.
+    tile_attributes : str or list of str, optional
+        Attribute columns written into tiles: ``"all"`` (default), ``"none"``
+        (geometry only; attributes come from the record lookup) or column names.
         Maximum retained features per intermediate tile reservoir.
     extent : int
         Vector tile extent.
@@ -339,6 +344,7 @@ def generate_mvt(
         feature_capacity=feature_capacity,
         extent=extent,
         buffer=buffer,
+        tile_attributes=tile_attributes,
     ).run()
 
     generated_pmtiles_path = getattr(result, "pmtiles_path", None)
@@ -369,6 +375,7 @@ def build(
     feature_capacity: int | None = None,
     extent: int | None = None,
     buffer: int | None = None,
+    tile_attributes: str | list[str] | None = None,
     **tile_kwargs,
 ) -> tuple[TileResult, MVTResult, str | None]:
     """Run the full pipeline: tile then generate MVTs.
@@ -398,6 +405,10 @@ def build(
         Parent directory for temporary files used by all build steps. Explicit
         values override the process-wide Starlet temp directory.
     feature_capacity : int
+        Maximum features larger than a display pixel kept per tile.
+    tile_attributes : str or list of str, optional
+        Attribute columns written into tiles: ``"all"`` (default), ``"none"``
+        (geometry only; attributes come from the record lookup) or column names.
         Maximum retained features per intermediate tile reservoir.
     extent : int
         Vector tile extent.
@@ -507,6 +518,7 @@ def build(
         feature_capacity=feature_capacity,
         extent=extent,
         buffer=buffer,
+        tile_attributes=tile_attributes,
     )
 
     return tile_result, mvt_result, mvt_result.pmtiles_path
@@ -559,6 +571,7 @@ def create_app(
     cache_size: int | None = None,
     extent: int | None = None,
     buffer: int | None = None,
+    tile_attributes: str | list[str] | None = None,
 ):
     """Create a Flask tile server application.
 
@@ -569,6 +582,10 @@ def create_app(
     cache_size : int, optional
         Number of tiles in the in-memory LRU cache. When omitted, Starlet uses
         the configured ``serve.cache_size`` value, or the built-in default.
+    tile_attributes : str or list of str, optional
+        Which attribute columns on-the-fly tiles carry: ``"all"`` (default),
+        ``"none"`` (geometry only; use the record lookup for attributes) or a
+        list / comma-separated string of column names.
     Returns
     -------
     Flask
@@ -580,6 +597,7 @@ def create_app(
         cache_size=cache_size,
         extent=extent,
         buffer=buffer,
+        tile_attributes=tile_attributes,
     )
 
 

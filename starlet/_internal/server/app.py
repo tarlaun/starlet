@@ -5,6 +5,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Optional
 
+import gzip
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ def create_app(
     buffer: int | None = None,
     on_the_fly_implementation: str | None = None,
     log_level: Optional[str] = None,
+    tile_attributes: object = None,
 ) -> Flask:
     """Create and configure a Flask tile server application.
 
@@ -89,6 +91,7 @@ def create_app(
                 memory_cache_size=resolved_cache_size,
                 extent=resolved_extent,
                 buffer=resolved_buffer,
+                tile_attributes=tile_attributes,
             )
         return tiler_cache[dataset]
 
@@ -117,6 +120,14 @@ def create_app(
             generation,
             elapsed_s,
         )
+        # Tiles compress 2-4x; gzip when the client accepts it (browsers do).
+        if len(data) >= 1024 and "gzip" in (request.headers.get("Accept-Encoding") or ""):
+            data = gzip.compress(data, compresslevel=3)
+            return Response(
+                data,
+                mimetype="application/vnd.mapbox-vector-tile",
+                headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+            )
         return Response(data, mimetype="application/vnd.mapbox-vector-tile")
 
     @app.get("/api/datasets")

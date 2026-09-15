@@ -67,7 +67,7 @@ buffer = 8
         buffers = []
 
         class FakeTiler:
-            def __init__(self, dataset_dir, memory_cache_size, extent, buffer):
+            def __init__(self, dataset_dir, memory_cache_size, extent, buffer, tile_attributes=None):
                 cache_sizes.append(memory_cache_size)
                 extents.append(extent)
                 buffers.append(buffer)

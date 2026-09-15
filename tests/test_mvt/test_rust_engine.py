@@ -184,3 +184,19 @@ def test_write_pyramid_matches_per_tile_generation(tmp_path, with_bbox):
     assert st2["features"] == 3
     ref2 = handle.generate_tile(0, 0, 0, feature_capacity=1, extent=4096, buffer=256)
     assert _decoded((tmp_path / "pyr2" / "0" / "0" / "0.mvt").read_bytes()) == _decoded(ref2)
+
+
+def test_tile_attributes_policy_matches_python(tmp_path):
+    """"none" strips every attribute, a column list keeps only those — in the
+    Rust engine and the Python reference alike."""
+    ds = _write_dataset(tmp_path / "ds", with_bbox=True)
+    rust_engine.invalidate()
+    for policy, expected_keys in (([], set()), (["name", "flag"], {"name", "flag"})):
+        rs = rust_engine.generate_tile(str(ds), 1, 0, 0, feature_capacity=10, extent=4096, buffer=256,
+                                       tile_attributes=policy)
+        py = _generate_single_mvt_tile_python(str(ds), (1, 0, 0), feature_capacity=10, tile_attributes=policy)
+        for blob in (rs, py):
+            feats = [f for l in mapbox_vector_tile.decode(blob).values() for f in l["features"]]
+            assert len(feats) == 3
+            assert all(set(f["properties"]) == expected_keys for f in feats), policy
+        assert _props(rs) == _props(py)

@@ -44,16 +44,45 @@ use crate::pq::{arrow_value, parse_filename_bbox, wkb_at, PqFile, BBOX_COLS, INT
 pub const LAYER_NAME: &str = "layer0";
 /// Display pixels per tile side used for the sub-pixel grid: a feature whose
 /// bbox fits in `extent / PIXEL_GRID` tile units (per dimension) is a "dot".
-pub const PIXEL_GRID: u32 = 512;
+pub const PIXEL_GRID: u32 = 256;
 /// starlet simplifies (tolerance 1 tile unit) only when a geometry has more than this many coordinates.
 pub const SIMPLIFY_MIN_COORDS: usize = 10;
 const BATCH_SIZE: usize = 8192;
 
-#[derive(Clone, Copy, Debug)]
+/// Which attribute columns non-dot features carry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum AttrPolicy {
+    #[default]
+    All,
+    None,
+    Only(Vec<String>),
+}
+
+impl AttrPolicy {
+    #[inline]
+    pub fn allows(&self, name: &str) -> bool {
+        match self {
+            AttrPolicy::All => true,
+            AttrPolicy::None => false,
+            AttrPolicy::Only(cols) => cols.iter().any(|c| c == name),
+        }
+    }
+    /// `None` = all, `Some([])` = none, `Some(cols)` = only those.
+    pub fn from_option(v: Option<Vec<String>>) -> AttrPolicy {
+        match v {
+            None => AttrPolicy::All,
+            Some(c) if c.is_empty() => AttrPolicy::None,
+            Some(c) => AttrPolicy::Only(c),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Params {
     pub feature_capacity: usize,
     pub extent: u32,
     pub buffer: u32,
+    pub attrs: AttrPolicy,
 }
 
 impl Params {
@@ -319,7 +348,7 @@ impl Dataset {
             tags.clear();
             let bare = is_dot || (strip_point_attrs && tg.kind == GeomKind::Point && sub_pixel(&tg, p));
             if !bare {
-                for name in &part.attr_cols {
+                for name in part.attr_cols.iter().filter(|n| p.attrs.allows(n)) {
                     if let Ok(ci) = b.schema().index_of(name) {
                         if let Some(v) = arrow_value(b.column(ci), row as usize) {
                             let ki = layer.key(name);
@@ -616,7 +645,7 @@ mod tests {
 
     #[test]
     fn sub_pixel_polygon_becomes_one_pixel_square_without_attributes() {
-        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256 };
+        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256, attrs: AttrPolicy::All };
         let tt = TileTransform::new(TileId::new(0, 0, 0), 4096, 256);
         // a 1 m square near the origin: far below one pixel at z0
         let (x, y) = lonlat_to_merc(10.0, 45.0);
@@ -637,7 +666,7 @@ mod tests {
 
     #[test]
     fn native_points_are_never_dots() {
-        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256 };
+        let p = Params { feature_capacity: 10, extent: 4096, buffer: 256, attrs: AttrPolicy::All };
         let tt = TileTransform::new(TileId::new(0, 0, 0), 4096, 256);
         let (x, y) = lonlat_to_merc(10.0, 45.0);
         let pt = Geometry { kind: GeomKind::Point, parts: vec![vec![[x, y]]], polys: vec![] };

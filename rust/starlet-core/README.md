@@ -42,13 +42,20 @@ python -c "import starlet_core; print(starlet_core.__version__, starlet_core.num
 
 **On-the-fly tile** (`Dataset.generate_tile(z, x, y)`): partitions are pruned by
 their filename bbox, row groups by the `_bbox_*` column statistics (written by
-`starlet tile --covering-bbox`, the default), and rows by bbox overlap. Every
-candidate is ranked by `crc32(source WKB)` and the top `feature_capacity` are
-kept — the same geometry-intrinsic priority the Python batch pipeline uses, so
-adjacent on-demand and pre-generated tiles agree on what they keep. Winners go
-through starlet's pipeline in starlet's order: affine to tile units, collapse
-shapes under 5.5 px to a point, Douglas-Peucker at 1 px (>10 vertices), clip to
-extent+buffer, encode. Decoded row groups live in an LRU shared across tiles.
+`starlet tile --covering-bbox`, the default), and rows by bbox overlap.
+Selection is *raster-consistent*: a candidate whose bbox fits inside one
+display pixel (`extent / PIXEL_GRID` tile units, PIXEL_GRID = 256 like a
+256 px raster tile) competes only with the other sub-pixel candidates of the
+same pixel cell and the one with the highest `crc32(source WKB)` priority is
+kept, so the tile shows every occupied pixel with a bounded feature count;
+larger candidates are ranked by the same priority and the top
+`feature_capacity` kept. The priority is geometry-intrinsic, so adjacent
+on-demand and pre-generated tiles agree on what they keep. Winners go through
+starlet's pipeline: affine to tile units; a sub-pixel polygon / line becomes a
+one-pixel square / segment of its own type (a *dot*, no attributes); larger
+shapes get Douglas-Peucker at 1 tile unit (>10 vertices), clipping to
+extent+buffer, and their attributes (subject to the tile-attributes policy);
+encode. Decoded row groups live in an LRU shared across tiles.
 
 Datasets **without** bbox columns still work: per-row bboxes are computed by a
 zero-allocation WKB scan on first touch and cached with the row group. That path

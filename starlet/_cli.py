@@ -141,13 +141,14 @@ def tile(
 @click.option("--threshold", type=float, default=None, help="Minimum feature threshold.")
 @click.option("--parallelism", type=int, default=None, help="Shared worker count used for MVT generation.")
 @click.option("--temp-dir", default=None, help="Parent directory for temporary MVT files.")
-@click.option("--feature-capacity", type=int, default=None, help="Maximum features kept per tile (deterministic sample; default 25000).")
+@click.option("--feature-capacity", type=int, default=None, help="Maximum features larger than a display pixel kept per tile (default 10000).")
+@click.option("--tile-attributes", default=None, help="Attribute columns written into tiles: all (default), none, or a comma-separated list.")
 @click.option("--extent", type=int, default=None, help="Vector tile extent.")
 @click.option("--buffer", type=int, default=None, help="Vector tile buffer in extent units.")
 @click.option("--pmtiles-compression", default=None, help="Compression for PMTiles export.")
 @click.option("--pmtiles/--no-pmtiles", default=None, help="Export generated tiles to a PMTiles archive.")
 @click.option("--log-level", default=None, help="Logging level.")
-def mvt(tile_dir, zoom, outdir, threshold, parallelism, temp_dir, feature_capacity, extent, buffer, pmtiles_compression, pmtiles, log_level):
+def mvt(tile_dir, zoom, outdir, threshold, parallelism, temp_dir, feature_capacity, tile_attributes, extent, buffer, pmtiles_compression, pmtiles, log_level):
     """Generate Mapbox Vector Tiles from a tiled dataset."""
     _setup_logging(_resolved_log_level("mvt", log_level))
     import starlet
@@ -162,6 +163,7 @@ def mvt(tile_dir, zoom, outdir, threshold, parallelism, temp_dir, feature_capaci
         temp_dir=resolve_command_value("mvt", "temp_dir", temp_dir),
         parallelism=command_parallelism("mvt", explicit=parallelism),
         feature_capacity=int(resolve_command_value("mvt", "feature_capacity", feature_capacity)),
+        tile_attributes=resolve_command_value("mvt", "tile_attributes", tile_attributes),
         extent=int(resolve_command_value("mvt", "extent", extent)),
         buffer=int(resolve_command_value("mvt", "buffer", buffer)),
     )
@@ -189,7 +191,8 @@ def mvt(tile_dir, zoom, outdir, threshold, parallelism, temp_dir, feature_capaci
 @click.option("--dtype", "histogram_dtype", default=None, help="Histogram data type.")
 @click.option("--sfc-bits", type=int, default=None, help="Bits per axis for Z-order / Hilbert key.")
 @click.option("--threshold", type=float, default=None, help="Minimum feature threshold.")
-@click.option("--feature-capacity", type=int, default=None, help="Maximum features kept per tile (deterministic sample; default 25000).")
+@click.option("--feature-capacity", type=int, default=None, help="Maximum features larger than a display pixel kept per tile (default 10000).")
+@click.option("--tile-attributes", default=None, help="Attribute columns written into tiles: all (default), none, or a comma-separated list.")
 @click.option("--extent", type=int, default=None, help="Vector tile extent.")
 @click.option("--buffer", type=int, default=None, help="Vector tile buffer in extent units.")
 @click.option("--pmtiles-compression", default=None, help="Compression for PMTiles export.")
@@ -219,6 +222,7 @@ def build(
     sfc_bits,
     threshold,
     feature_capacity,
+    tile_attributes,
     extent,
     buffer,
     pmtiles_compression,
@@ -246,6 +250,7 @@ def build(
         temp_dir=resolve_command_value("build", "temp_dir", temp_dir),
         parallelism=parallelism,
         feature_capacity=int(resolve_command_value("build", "feature_capacity", feature_capacity, fallback_sections=("mvt",))),
+        tile_attributes=resolve_command_value("build", "tile_attributes", tile_attributes, fallback_sections=("mvt",)),
         extent=int(resolve_command_value("build", "extent", extent, fallback_sections=("mvt",))),
         buffer=int(resolve_command_value("build", "buffer", buffer, fallback_sections=("mvt",))),
         sort=str(resolve_command_value("build", "sort", sort, fallback_sections=("tile",))),
@@ -274,8 +279,9 @@ def build(
 @click.option("--host", default=None, help="Server host.")
 @click.option("--port", type=int, default=None, help="Server port.")
 @click.option("--cache-size", type=int, default=None, help="Number of tiles to keep in the in-memory cache.")
+@click.option("--tile-attributes", default=None, help="Attribute columns in on-the-fly tiles: all (default), none, or a comma-separated list.")
 @click.option("--log-level", default=None, help="Logging level.")
-def serve(data_dir, host, port, cache_size, log_level):
+def serve(data_dir, host, port, cache_size, tile_attributes, log_level):
     """Launch the tile server."""
     _setup_logging(_resolved_log_level("serve", log_level))
     import starlet
@@ -286,6 +292,7 @@ def serve(data_dir, host, port, cache_size, log_level):
     app = starlet.create_app(
         data_dir=data_dir,
         cache_size=cache_size,
+        tile_attributes=resolve_command_value("serve", "tile_attributes", tile_attributes, fallback_sections=("mvt",)),
     )
     click.echo(f"Starting starlet server on {host}:{port}")
     click.echo(f"  Data root: {data_dir}")

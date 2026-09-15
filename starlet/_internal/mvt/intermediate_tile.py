@@ -46,7 +46,7 @@ from starlet._internal.mvt.pyramid_partitioner import PyramidPartitioner
 from .helpers import EXTENT, explode_geom, mercator_tile_bounds
 
 
-DEFAULT_FEATURE_CAPACITY = 25_000
+DEFAULT_FEATURE_CAPACITY = 10_000
 _FEATURES_SEEN_HEADER = struct.Struct("<Q")
 _FEATURES_SEEN_PADDING = 0
 
@@ -54,7 +54,7 @@ _FEATURES_SEEN_PADDING = 0
 # ``extent / PIXEL_GRID`` tile units in BOTH dimensions is a sub-pixel "dot".
 # Judged per-dimension, not by bbox area: a long straight line has bbox area
 # 0 but is not a dot.
-PIXEL_GRID = 512
+PIXEL_GRID = 256
 
 
 def feature_priority(wkb_bytes: bytes) -> int:
@@ -81,8 +81,11 @@ class IntermediateVectorTile:
         extent: int = EXTENT,
         buffer: int = 256,
         rng: random.Random | None = None,
+        tile_attributes: Any = None,
     ) -> None:
         self.z = int(z)
+        # None = every attribute; a list = only those columns ([] = none)
+        self.tile_attributes = normalize_tile_attributes(tile_attributes)
         self.x = int(x)
         self.y = int(y)
         self.feature_capacity = max(1, int(feature_capacity))
@@ -349,10 +352,34 @@ class IntermediateVectorTile:
                 out.append(
                     {
                         "geometry": geometry,
-                        "properties": {} if bare else dict(feature.properties),
+                        "properties": {} if bare else self._select_properties(feature.properties),
                     }
                 )
         return out
+
+    def _select_properties(self, properties: dict[str, Any]) -> dict[str, Any]:
+        if self.tile_attributes is None:
+            return dict(properties)
+        return {k: v for k, v in properties.items() if k in self.tile_attributes}
+
+
+def normalize_tile_attributes(value: Any) -> list[str] | None:
+    """Tile-attribute policy -> ``None`` (all columns) or a list of columns.
+
+    Accepts ``None``/``"all"`` (everything), ``"none"``/``""``/``[]`` (no
+    attributes in tiles — fetch them with the record lookup), a comma-separated
+    string, or a sequence of column names.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lower() in ("", "all", "*"):
+            return None
+        if text.lower() == "none":
+            return []
+        return [part.strip() for part in text.split(",") if part.strip()]
+    return [str(v) for v in value]
 
 
 def _base_kind(geometry: Any) -> str:

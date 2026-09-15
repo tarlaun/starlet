@@ -49,6 +49,12 @@ def _configured_tiler_feature_capacity() -> int:
     return int(config_value("mvt", "feature_capacity"))
 
 
+def _configured_tiler_attributes():
+    from starlet._internal.mvt.intermediate_tile import normalize_tile_attributes
+
+    return normalize_tile_attributes(config_value("mvt", "tile_attributes"))
+
+
 def _get_cached_vector_tiler(dataset_dir: str | Path) -> Any:
     from starlet._internal.server.tiler.tiler import VectorTiler
 
@@ -57,7 +63,9 @@ def _get_cached_vector_tiler(dataset_dir: str | Path) -> Any:
     extent = _configured_tiler_extent()
     buffer = _configured_tiler_buffer()
     feature_capacity = _configured_tiler_feature_capacity()
-    key = (dataset_path, cache_size, extent, buffer, feature_capacity)
+    tile_attributes = _configured_tiler_attributes()
+    key = (dataset_path, cache_size, extent, buffer, feature_capacity,
+           None if tile_attributes is None else tuple(tile_attributes))
 
     with _TILER_CACHE_LOCK:
         tiler = _TILER_CACHE.get(key)
@@ -68,6 +76,7 @@ def _get_cached_vector_tiler(dataset_dir: str | Path) -> Any:
                 extent=extent,
                 buffer=buffer,
                 feature_capacity=feature_capacity,
+                tile_attributes=tile_attributes,
             )
             _TILER_CACHE[key] = tiler
         return tiler

@@ -89,7 +89,7 @@ buffer = 64
 
     captured = {}
 
-    def fake_generate_mvt(*, tile_dir, zoom, threshold, pmtiles, pmtiles_compression, outdir, parallelism, temp_dir, feature_capacity, extent, buffer):
+    def fake_generate_mvt(*, tile_dir, zoom, threshold, pmtiles, pmtiles_compression, outdir, parallelism, temp_dir, feature_capacity, extent, buffer, tile_attributes=None):
         captured.update(
             tile_dir=tile_dir,
             zoom=zoom,
@@ -196,7 +196,7 @@ cache_size = 99
                 threaded=threaded,
             )
 
-    def fake_create_app(*, data_dir, cache_size):
+    def fake_create_app(*, data_dir, cache_size, tile_attributes=None):
         captured.update(data_dir=data_dir, cache_size=cache_size)
         return FakeApp()
 

@@ -68,9 +68,30 @@ full option list.
 | `--partition-size` | build, tile | `128mb` GeoParquet / `512mb` GeoJSON | Target tile size, e.g. `256mb`, `1gb` |
 | `--pmtiles` | build, mvt | off | Also export a single `.pmtiles` archive |
 | `--threshold` | build, mvt | `0` | Minimum feature count for a tile to be generated |
-| `--feature-capacity` | build, mvt | `25000` | Max features kept per tile. Tiles with more are thinned by a deterministic sample; raise it for denser low-zoom tiles (bigger tiles), lower it for smaller ones |
+| `--feature-capacity` | build, mvt | `10000` | Max features *larger than a pixel* kept per tile (see below) |
+| `--tile-attributes` | build, mvt, serve | `all` | Attribute columns written into tiles: `all`, `none`, or `name,class,…` (see below) |
 | `--dir` | serve, mvt, info | required | Dataset directory (or the root of several, for `serve`) |
 | `--port` | serve | `8765` | Port to bind the server |
+
+### How tiles stay small without going sparse
+
+A tile is selected per display pixel, the way a rasterised plot would be:
+every feature that fits inside one pixel competes only with the other
+sub-pixel features of the *same* pixel, and one survives, so a low-zoom tile
+shows every occupied pixel with a bounded feature count. Sub-pixel polygons
+and lines are drawn as one-pixel shapes of their own type (a tiny park is
+still a polygon, styled like the big ones) and carry no attributes. Features
+larger than a pixel keep their simplified shape and attributes; only they
+are subject to `--feature-capacity`. Selection is deterministic (a hash of
+the geometry), so neighbouring tiles and zoom levels agree on what they keep.
+
+Attributes are usually the bulk of a tile (on OSM extracts, the tag blob can
+be 70% of the bytes). `--tile-attributes none` writes geometry-only tiles
+(several times smaller); `--tile-attributes name,class` keeps just the
+columns your style needs. Clicking a record in the viewer fetches its full
+attributes from the server
+(`GET /datasets/<dataset>/features/at.json?mbr=minx,miny,maxx,maxy`), so they
+are always available, whatever the tiles carry.
 
 ### Examples
 
@@ -117,6 +138,7 @@ While `starlet serve` is running:
 | `GET` | `/datasets/<dataset>.json` | Dataset metadata (bbox, zoom range) |
 | `GET`/`POST` | `/datasets/<dataset>/features.<csv\|geojson>` | Download features (optional geometry filter) |
 | `GET` | `/api/datasets/<dataset>/stats` | Per-attribute statistics |
+| `GET` | `/datasets/<dataset>/features/at.json?mbr=…` | Records under a point (click-to-inspect), with attributes |
 
 Tiles are served in tiers — an in-memory LRU cache, then a pre-generated
 PMTiles archive or `.mvt` files on disk, then generated on the fly from the
