@@ -593,21 +593,31 @@ def _generate_single_mvt_tile_python(
     return tile.encode(layer_name=layer_name)
 
 
-def _offer(heap, cells, cell, feature_capacity, priority, seq, payload):
-    """Shared pre-selection step: pixel-cell winner or top-k heap entry."""
-    if cell is not None:
-        current = cells.get(cell)
-        if current is not None and priority <= current[0]:
+def _offer(heap, cells, placement, feature_capacity, hash_priority, seq, payload):
+    """Shared pre-selection step (mirrors ``IntermediateVectorTile``): the
+    top-k larger-than-a-pixel rows by (size, hash) go to ``heap``; every
+    other row is a dot candidate for the pixel cell of its bbox centre.
+    Heap entries are ``(priority, seq, cell, *payload)``."""
+    cell, small, size16 = placement
+    priority = IntermediateVectorTile.combine_priority(size16, hash_priority)
+
+    def offer_cell(c, entry):
+        current = cells.get(c)
+        if current is not None and entry[0] <= current[0]:
             return False
-        cells[cell] = (priority, seq) + payload
+        cells[c] = entry
         return True
-    if len(heap) >= feature_capacity and priority <= heap[0][0]:
-        return False
-    entry = (priority, seq) + payload
+
+    entry = (priority, seq, cell) + payload
+    if small:
+        return offer_cell(cell, entry)
     if len(heap) < feature_capacity:
         heapq.heappush(heap, entry)
-    else:
-        heapq.heapreplace(heap, entry)
+        return True
+    if priority <= heap[0][0]:
+        return offer_cell(cell, entry)
+    evicted = heapq.heapreplace(heap, entry)
+    offer_cell(evicted[2], evicted)
     return True
 
 
@@ -631,9 +641,9 @@ def _sample_single_tile_records(
     those legacy datasets need the older geometry-based path for correctness.
     """
     feature_capacity = max(1, int(feature_capacity))
-    # Entries: (priority, seq, wkb, crs, table, geom_col, row_idx).
-    heap: list[tuple[int, int, bytes, Any, pa.Table, str, int]] = []
-    cells: dict[tuple[int, int], tuple[int, int, bytes, Any, pa.Table, str, int]] = {}
+    # Entries: (priority, seq, cell, wkb, crs, table, geom_col, row_idx).
+    heap: list[tuple] = []
+    cells: dict[tuple[int, int], tuple] = {}
     seq = 0
 
     for path in index.find_intersecting_files(query_bounds_4326):
@@ -650,14 +660,13 @@ def _sample_single_tile_records(
             if geometry_wkb is None:
                 continue
             priority = feature_priority(geometry_wkb)
-            cell = tile.dot_cell(bounds_merc[row_idx])
-            if _offer(heap, cells, cell, feature_capacity, priority, seq,
+            if _offer(heap, cells, tile.place(bounds_merc[row_idx]), feature_capacity, priority, seq,
                       (geometry_wkb, crs, table, geom_col, row_idx)):
                 seq += 1
 
     samples = [
         (geometry_wkb, _row_attrs(table, geom_col, row_idx), crs, priority)
-        for (priority, _, geometry_wkb, crs, table, geom_col, row_idx) in list(heap) + list(cells.values())
+        for (priority, _, _, geometry_wkb, crs, table, geom_col, row_idx) in list(heap) + list(cells.values())
     ]
     return _decode_sampled_features(samples)
 
@@ -700,9 +709,9 @@ def _sample_single_tile_records_legacy(
     mutually consistent. Attribute dicts are built only for winners.
     """
     feature_capacity = max(1, int(feature_capacity))
-    # Entries: (priority, seq, geom, col_arrays, row_idx).
-    heap: list[tuple[int, int, Any, dict[str, Any], int]] = []
-    cells: dict[tuple[int, int], tuple[int, int, Any, dict[str, Any], int]] = {}
+    # Entries: (priority, seq, cell, geom, col_arrays, row_idx).
+    heap: list[tuple] = []
+    cells: dict[tuple[int, int], tuple] = {}
     seq = 0
 
     for gdf in index.iter_query_batches(query_bounds_4326, target_crs=WEB_MERCATOR_CRS):
@@ -715,7 +724,7 @@ def _sample_single_tile_records_legacy(
             if geom is None or geom.is_empty:
                 continue
             priority = feature_priority(shapely.to_wkb(geom))
-            if _offer(heap, cells, tile.dot_cell(geom.bounds), feature_capacity, priority, seq,
+            if _offer(heap, cells, tile.place(geom.bounds), feature_capacity, priority, seq,
                       (geom, col_arrays, row_idx)):
                 seq += 1
 
@@ -729,7 +738,7 @@ def _sample_single_tile_records_legacy(
             },
             priority,
         )
-        for (priority, _, geom, col_arrays, row_idx) in list(heap) + list(cells.values())
+        for (priority, _, _, geom, col_arrays, row_idx) in list(heap) + list(cells.values())
     ]
 
 

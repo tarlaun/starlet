@@ -95,7 +95,11 @@ def test_feature_can_be_skipped_by_lower_priority():
 
     tile.simplify_geometry = fail_if_called
 
-    assert not tile.add_feature(_big(3e6), {"id": 2}, priority=5)
+    # a lower-priority feature does not enter the top-k; it survives only as
+    # a dot, and nothing is simplified at offer time
+    assert tile.add_feature(_big(3e6), {"id": 2}, priority=5)
+    assert [f.properties["id"] for f in tile.full_features] == [1]
+    assert [f.properties["id"] for f in tile.dot_features] == [2]
     assert not called
 
 
@@ -106,9 +110,10 @@ def test_feature_capacity_evicts_lowest_priority_to_make_room():
     assert tile.add_feature(_big(0), {"id": 2}, priority=5)
     assert tile.add_feature(_big(3e6), {"id": 3}, priority=9)
 
-    retained_ids = {feature.properties["id"] for feature in tile._features}
-    assert retained_ids == {2, 3}
-    assert tile.feature_count == 2
+    # the two best stay in full; the evicted one survives as a dot
+    assert {feature.properties["id"] for feature in tile.full_features} == {2, 3}
+    assert {feature.properties["id"] for feature in tile.dot_features} == {1}
+    assert tile.feature_count == 3
     assert tile._features_seen == 3
 
 
@@ -133,9 +138,8 @@ def test_merge_combines_same_tile_without_simplifying_again():
 
     left.simplify_geometry = original_simplify_geometry
     left.add_feature = original_add_feature
-    retained_ids = {feature.properties["id"] for feature in left._features}
-    assert retained_ids == {2, 3}
-    assert left.feature_count == 2
+    assert {feature.properties["id"] for feature in left.full_features} == {2, 3}
+    assert {feature.properties["id"] for feature in left.dot_features} == {1}
     assert left._features_seen == 3
 
 
@@ -177,11 +181,12 @@ def test_feature_arrow_roundtrip_populates_tile_state(tmp_path):
     loaded = IntermediateVectorTile(0, 0, 0, feature_capacity=10)
     loaded.load_features(path)
 
-    assert loaded.feature_count == 1
+    # both survive (one in full, the evicted one as a dot) and reload as such
+    assert loaded.feature_count == 2
     assert loaded._features_seen == 2
-    assert loaded._features[0].properties == {"id": 1}
+    assert [f.properties for f in loaded.full_features] == [{"id": 1}, {"id": 2}]
     # Priorities survive the roundtrip so reduce-side merges rank correctly.
-    assert loaded._heap[0][0] == 9
+    assert max(p for p, _, _ in loaded._heap) & 0xFFFFFFFF == 9
 
 
 def test_same_geometry_gets_same_default_priority_in_every_tile():
@@ -219,12 +224,12 @@ def test_merge_is_order_independent():
         first = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
         for src in order:
             clone = IntermediateVectorTile(0, 0, 0, feature_capacity=2)
-            for prio, _, feat in src._entries():
+            for prio, _, feat, _ in src._entries():
                 clone.add_feature(feat.geometry, dict(feat.properties), priority=prio)
             first.merge(clone)
-        return {feature.properties["id"] for feature in first._features}
+        return ({f.properties["id"] for f in first.full_features}, {f.properties["id"] for f in first.dot_features})
 
-    assert merged_ids([a, b, c]) == merged_ids([c, b, a]) == {2, 3}
+    assert merged_ids([a, b, c]) == merged_ids([c, b, a]) == ({2, 3}, {1})
 
 
 def test_sub_pixel_features_keep_one_per_pixel_cell_regardless_of_capacity():
@@ -287,3 +292,15 @@ def test_tile_attributes_policy_filters_encoded_properties():
     tile.add_feature(_big(0), {"id": 1, "name": "x"})
     decoded = mapbox_vector_tile.decode(tile.encode())["layer0"]["features"]
     assert decoded[0]["properties"] == {"name": "x"}
+
+
+def test_size_outranks_hash_for_features_larger_than_a_pixel():
+    tile = IntermediateVectorTile(0, 0, 0, feature_capacity=1)
+    assert tile.add_feature(_big(0, size=5e5), {"id": "small"}, priority=2**32 - 1)
+    assert tile.add_feature(_big(3e6, size=5e6), {"id": "big"}, priority=0)
+    assert [f.properties["id"] for f in tile.full_features] == ["big"]
+    assert [f.properties["id"] for f in tile.dot_features] == ["small"]
+    decoded = mapbox_vector_tile.decode(tile.encode())["layer0"]["features"]
+    dot = next(f for f in decoded if not f["properties"])
+    xs = [c[0] for c in dot["geometry"]["coordinates"][0]]
+    assert max(xs) - min(xs) == tile.cell  # demoted feature drawn as a one-pixel square

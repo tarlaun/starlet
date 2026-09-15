@@ -3,14 +3,16 @@
 //!
 //! * partitions pruned by their filename bbox, row groups by `_bbox_*`
 //!   statistics, rows by bbox overlap (WKB bbox when the columns are absent);
-//! * **raster-consistent selection**: a feature whose bbox fits inside one
-//!   display pixel (`extent / PIXEL_GRID` tile units per side) competes only
-//!   with the other sub-pixel features of the *same pixel cell* — the one
-//!   with the highest `crc32(source WKB)` priority is kept — so a tile shows
-//!   every occupied pixel, like a rasterised plot, with a bounded number of
-//!   features. Features larger than a pixel are ranked by the same priority
-//!   and the top `feature_capacity` kept. The priority is geometry-intrinsic,
-//!   so adjacent on-demand and pre-generated tiles agree on what they keep.
+//! * **raster-consistent selection**: every candidate gets a priority of
+//!   `(size in tile units, crc32(source WKB))` — bigger first, hash as the
+//!   tie-break. The `feature_capacity` highest-priority features larger than
+//!   a display pixel (`extent / PIXEL_GRID` tile units per side) are kept in
+//!   full; *every other* candidate — sub-pixel ones and the larger ones that
+//!   did not make the cut — contributes a one-pixel *dot* to the pixel cell
+//!   of its bbox centre, one dot per cell (highest priority). So a tile
+//!   shows every occupied pixel, like a rasterised plot, and its biggest
+//!   shapes in detail, with a bounded number of features. Priorities are
+//!   geometry-intrinsic, so adjacent on-demand and pre-generated tiles agree.
 //! * per-feature pipeline: affine to tile units; a sub-pixel polygon becomes
 //!   a one-pixel square, a sub-pixel line a one-pixel segment (its geometry
 //!   type is preserved, so it is styled like its full-size siblings; such
@@ -93,19 +95,48 @@ impl Params {
     }
 }
 
-/// Pixel cell of a sub-pixel feature, or `None` when the feature is larger
-/// than a pixel. `rb` is the feature bbox in EPSG:4326; the cell is keyed on
-/// the bbox centre in tile units (negative indices occur in the buffer).
+/// How a candidate relates to the tile's pixel grid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    /// pixel cell of the bbox centre (negative indices occur in the buffer)
+    pub cell: (i32, i32),
+    /// bbox fits inside one pixel (per dimension)
+    pub small: bool,
+    /// `max(width, height)` of the bbox in 1/16 tile units, saturated
+    pub size16: u32,
+}
+
+/// Classify a candidate by its EPSG:4326 bbox `rb` against a tile.
 #[inline]
-pub fn dot_cell(rb: &[f64; 4], tt: &TileTransform, cell: f64) -> Option<(i32, i32)> {
+pub fn place(rb: &[f64; 4], tt: &TileTransform, cell: f64) -> Placement {
     let (ax, ay) = lonlat_to_merc(rb[0], rb[1]);
     let (bx, by) = lonlat_to_merc(rb[2], rb[3]);
     let (x0, y0) = tt.apply(ax, ay);
     let (x1, y1) = tt.apply(bx, by);
-    if (x1 - x0).abs() <= cell && (y1 - y0).abs() <= cell {
-        let cx = (x0 + x1) * 0.5;
-        let cy = (y0 + y1) * 0.5;
-        Some(((cx / cell).floor() as i32, (cy / cell).floor() as i32))
+    let w = (x1 - x0).abs();
+    let h = (y1 - y0).abs();
+    let cx = (x0 + x1) * 0.5;
+    let cy = (y0 + y1) * 0.5;
+    Placement {
+        cell: ((cx / cell).floor() as i32, (cy / cell).floor() as i32),
+        small: w <= cell && h <= cell,
+        size16: (w.max(h) * 16.0).min(u32::MAX as f64 / 2.0) as u32,
+    }
+}
+
+/// Selection priority: size first, `crc32(source WKB)` as the tie-break.
+#[inline]
+pub fn priority(size16: u32, crc: u32) -> u64 {
+    ((size16 as u64) << 32) | crc as u64
+}
+
+/// `dot_cell` compatibility helper: the pixel cell when the feature is
+/// sub-pixel, else `None`.
+#[inline]
+pub fn dot_cell(rb: &[f64; 4], tt: &TileTransform, cell: f64) -> Option<(i32, i32)> {
+    let pl = place(rb, tt, cell);
+    if pl.small {
+        Some(pl.cell)
     } else {
         None
     }
@@ -237,15 +268,26 @@ impl Dataset {
         let mut stats = Stats { partitions_total: self.parts.len(), ..Default::default() };
 
         // ---- candidates ------------------------------------------------------
-        // Features larger than a display pixel: top-k by crc32(wkb).
-        // Sub-pixel features: the best one per pixel cell (raster-consistent).
+        // The top-k (by size, then crc32) features larger than a display
+        // pixel are kept in full; every other candidate becomes a dot in the
+        // pixel cell of its bbox centre, one dot per cell (raster-consistent).
         let k = p.feature_capacity.max(1);
         let cell = p.cell();
         let mut batches: Vec<(Arc<CachedRg>, usize, usize)> = Vec::new(); // (row group, batch idx, partition idx)
-        // min-heap on (priority, seq); payload = (batch slot, row)
-        let mut heap: BinaryHeap<Reverse<(u32, u64, usize, u32)>> = BinaryHeap::with_capacity(k + 1);
-        let mut cells: HashMap<(i32, i32), (u32, u64, usize, u32)> = HashMap::new();
+        // min-heap on (priority, seq); payload = (batch slot, row, cell)
+        let mut heap: BinaryHeap<Reverse<(u64, u64, usize, u32, (i32, i32))>> = BinaryHeap::with_capacity(k + 1);
+        let mut cells: HashMap<(i32, i32), (u64, u64, usize, u32)> = HashMap::new();
         let mut seq: u64 = 0;
+        #[inline]
+        fn offer_cell(cells: &mut HashMap<(i32, i32), (u64, u64, usize, u32)>, c: (i32, i32), e: (u64, u64, usize, u32)) {
+            match cells.get_mut(&c) {
+                Some(cur) if e.0 <= cur.0 => {}
+                Some(cur) => *cur = e,
+                None => {
+                    cells.insert(c, e);
+                }
+            }
+        }
 
         for (pi, part) in self.parts.iter().enumerate() {
             if !bbox_intersects(&part.bbox, &q) {
@@ -296,24 +338,20 @@ impl Dataset {
                             continue;
                         }
                         stats.candidates += 1;
-                        let prio = crc32fast::hash(w);
-                        if let Some(c) = dot_cell(&rb, &tt, cell) {
-                            match cells.get_mut(&c) {
-                                Some(cur) if prio <= cur.0 => continue,
-                                Some(cur) => *cur = (prio, seq, slot, i as u32),
-                                None => {
-                                    cells.insert(c, (prio, seq, slot, i as u32));
-                                }
-                            }
+                        let pl = place(&rb, &tt, cell);
+                        let prio = priority(pl.size16, crc32fast::hash(w));
+                        let e = (prio, seq, slot, i as u32);
+                        if pl.small {
+                            offer_cell(&mut cells, pl.cell, e);
+                        } else if heap.len() >= k && prio <= heap.peek().unwrap().0 .0 {
+                            // did not make the cut: a dot instead
+                            offer_cell(&mut cells, pl.cell, e);
                         } else {
                             if heap.len() >= k {
-                                // starlet: skip unless strictly higher than the current minimum
-                                if prio <= heap.peek().unwrap().0 .0 {
-                                    continue;
-                                }
-                                heap.pop();
+                                let Reverse((ep, eq, es, er, ec)) = heap.pop().unwrap();
+                                offer_cell(&mut cells, ec, (ep, eq, es, er));
                             }
-                            heap.push(Reverse((prio, seq, slot, i as u32)));
+                            heap.push(Reverse((prio, seq, slot, i as u32, pl.cell)));
                         }
                         seq += 1;
                         used = true;
@@ -332,11 +370,12 @@ impl Dataset {
         // at most `feature_capacity` sub-pixel features; denser tiles carry
         // them as bare dots (attributes stay reachable through `query`).
         let strip_point_attrs = cells.len() > k;
-        let mut winners: Vec<(u64, usize, u32)> =
-            heap.into_iter().map(|Reverse((_, q, s, r))| (q, s, r)).collect();
-        winners.extend(cells.into_values().map(|(_, q, s, r)| (q, s, r)));
+        // (seq, slot, row, as_dot)
+        let mut winners: Vec<(u64, usize, u32, bool)> =
+            heap.into_iter().map(|Reverse((_, q, s, r, _))| (q, s, r, false)).collect();
+        winners.extend(cells.into_values().map(|(_, q, s, r)| (q, s, r, true)));
         winners.sort_unstable(); // deterministic feature order (offer order)
-        for (_, slot, row) in winners {
+        for (_, slot, row, as_dot) in winners {
             let (rgc, bi, pi) = &batches[slot];
             let b = &rgc.batches[*bi];
             let part = &self.parts[*pi];
@@ -344,7 +383,7 @@ impl Dataset {
             let Some(w) = wkb_at(b, gi, row as usize) else { continue };
             let Ok(mut g) = Geometry::from_wkb(w) else { continue };
             g.from_lonlat_to_merc();
-            let Some((tg, is_dot)) = to_tile_geometry(&g, &tt, p) else { continue };
+            let Some((tg, is_dot)) = to_tile_geometry(&g, &tt, p, as_dot) else { continue };
             tags.clear();
             let bare = is_dot || (strip_point_attrs && tg.kind == GeomKind::Point && sub_pixel(&tg, p));
             if !bare {
@@ -529,17 +568,18 @@ pub fn sub_pixel(g: &Geometry, p: &Params) -> bool {
 
 /// starlet's `simplify_geometry` pipeline on a Mercator geometry. Returns
 /// the tile-unit geometry and whether it was reduced to a one-pixel *dot*
-/// (a collapsed polygon or line; dots carry no attributes).
-pub fn to_tile_geometry(g_merc: &Geometry, tt: &TileTransform, p: &Params) -> Option<(Geometry, bool)> {
+/// (a collapsed polygon or line; dots carry no attributes). `as_dot` forces
+/// the dot form (a feature that did not make the top-k).
+pub fn to_tile_geometry(g_merc: &Geometry, tt: &TileTransform, p: &Params, as_dot: bool) -> Option<(Geometry, bool)> {
     let mut g = g_merc.clone();
     g.map_coords(|x, y| tt.apply(x, y));
     if g.is_empty() {
         return None;
     }
-    // sub-pixel shapes become a one-pixel shape of the same kind
+    // sub-pixel shapes (and demoted larger ones) become a one-pixel shape of the same kind
     let bb = g.bbox();
     let cell = p.cell();
-    if bb.width() <= cell && bb.height() <= cell {
+    if as_dot || (bb.width() <= cell && bb.height() <= cell) {
         let c = bb.center();
         let h = cell * 0.5;
         // keep dots inside the buffered tile only (a point is never clipped,
@@ -654,7 +694,7 @@ mod tests {
             parts: vec![vec![[x, y], [x + 1.0, y], [x + 1.0, y + 1.0], [x, y + 1.0], [x, y]]],
             polys: vec![0],
         };
-        let (g, is_dot) = to_tile_geometry(&sq, &tt, &p).unwrap();
+        let (g, is_dot) = to_tile_geometry(&sq, &tt, &p, false).unwrap();
         assert!(is_dot);
         assert_eq!(g.kind, GeomKind::Polygon);
         let bb = g.bbox();
@@ -670,8 +710,10 @@ mod tests {
         let tt = TileTransform::new(TileId::new(0, 0, 0), 4096, 256);
         let (x, y) = lonlat_to_merc(10.0, 45.0);
         let pt = Geometry { kind: GeomKind::Point, parts: vec![vec![[x, y]]], polys: vec![] };
-        let (g, is_dot) = to_tile_geometry(&pt, &tt, &p).unwrap();
+        let (g, is_dot) = to_tile_geometry(&pt, &tt, &p, false).unwrap();
         assert!(!is_dot && g.kind == GeomKind::Point);
+        // size-first priority: a bigger feature outranks a smaller one whatever the hash
+        assert!(priority(100, 0) > priority(3, u32::MAX));
     }
 
     #[test]

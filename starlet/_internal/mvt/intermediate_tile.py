@@ -5,23 +5,24 @@ retains a bounded uniform sample of them, merges with partial tiles from
 other mappers, and simplifies the retained features into tile pixel
 coordinates only when encoding MVT bytes.
 
-Sampling is **raster-consistent and priority-based**. Every feature
-carries a priority (by default ``crc32`` of its WKB — geometry-intrinsic and
-deterministic; the batch pipeline passes the crc32 of the *source* WKB bytes
-computed before decode). A feature whose bbox fits inside one display pixel
-(``extent / PIXEL_GRID`` tile units per side) competes only with the other
-sub-pixel features of the *same pixel cell*: the highest priority one is
-kept, so the tile shows every occupied pixel — like a rasterised plot —
-with a bounded number of features. Features larger than a pixel are ranked
-by the same priority and the ``feature_capacity`` best are kept. Because
-the same geometry has the same priority in every tile (and zoom level) it
-touches, adjacent tiles make consistent keep/drop decisions — no seam
-popping — and merging partial tiles from different mappers is a
-deterministic union instead of a statistical resample.
+Sampling is **raster-consistent and priority-based**. Every feature gets a
+priority of ``(size in tile units, hash)`` — bigger first, the hash (by
+default ``crc32`` of its WKB — geometry-intrinsic and deterministic; the
+batch pipeline passes the crc32 of the *source* WKB bytes computed before
+decode) as the tie-break. The ``feature_capacity`` highest-priority
+features larger than one display pixel (``extent / PIXEL_GRID`` tile units
+per side) are kept in full. *Every other* feature — sub-pixel ones and the
+larger ones that did not make the cut — contributes a one-pixel *dot* to
+the pixel cell of its bbox centre, one dot per cell (highest priority), so
+the tile shows every occupied pixel, like a rasterised plot, and its biggest
+shapes in detail, with a bounded number of features. Because the same
+geometry has the same priority in every tile it touches, adjacent tiles
+make consistent decisions — no seam popping — and merging partial tiles
+from different mappers is a deterministic union.
 
-Sub-pixel polygons and lines are encoded as a one-pixel square / segment of
-their own geometry type (so they are styled like their full-size siblings)
-and carry no attributes — those *dots* are looked up on demand.
+Dots are encoded as a one-pixel square / segment of their own geometry type
+(so they are styled like their full-size siblings) and carry no attributes —
+they are looked up on demand.
 """
 from __future__ import annotations
 
@@ -113,7 +114,8 @@ class IntermediateVectorTile:
         # than-a-pixel features by priority. seq is an insertion tiebreaker so
         # heap comparisons never fall through to comparing feature objects.
         self._heap: list[tuple[int, int, _TileFeature]] = []
-        # Sub-pixel features: best (priority, seq, feature) per pixel cell.
+        # Dots: best (priority, seq, feature) per pixel cell — sub-pixel
+        # features and larger ones that did not make the top-k.
         self._cells: dict[tuple[int, int], tuple[int, int, _TileFeature]] = {}
         self.cell = self.extent / PIXEL_GRID
         self._seq = 0
@@ -125,12 +127,30 @@ class IntermediateVectorTile:
         x_scale, _, _, y_scale, xoff, yoff = self.affine_params
         return (minx * x_scale + xoff, miny * y_scale + yoff, maxx * x_scale + xoff, maxy * y_scale + yoff)
 
+    def place(self, bounds: tuple[float, float, float, float]) -> tuple[tuple[int, int], bool, int]:
+        """``(pixel cell of the bbox centre, fits in one pixel, size16)`` for
+        Web Mercator ``bounds``; ``size16`` is max(width, height) in 1/16 tile units."""
+        x0, y0, x1, y1 = self._tile_bbox(bounds)
+        w, h = abs(x1 - x0), abs(y1 - y0)
+        cell = (math.floor((x0 + x1) * 0.5 / self.cell), math.floor((y0 + y1) * 0.5 / self.cell))
+        return cell, (w <= self.cell and h <= self.cell), min(int(max(w, h) * 16.0), 2**31 - 1)
+
     def dot_cell(self, bounds: tuple[float, float, float, float]) -> tuple[int, int] | None:
         """Pixel cell of a sub-pixel feature (Web Mercator ``bounds``), else None."""
-        x0, y0, x1, y1 = self._tile_bbox(bounds)
-        if (x1 - x0) <= self.cell and (y1 - y0) <= self.cell:
-            return (math.floor((x0 + x1) * 0.5 / self.cell), math.floor((y0 + y1) * 0.5 / self.cell))
-        return None
+        cell, small, _ = self.place(bounds)
+        return cell if small else None
+
+    @staticmethod
+    def combine_priority(size16: int, hash_priority: int) -> int:
+        """Selection priority: size first, the (crc32) hash as the tie-break."""
+        return (int(size16) << 32) | (int(hash_priority) & 0xFFFFFFFF)
+
+    def _offer_cell(self, cell: tuple[int, int], entry: tuple[int, int, _TileFeature]) -> bool:
+        current = self._cells.get(cell)
+        if current is not None and entry[0] <= current[0]:
+            return False
+        self._cells[cell] = entry
+        return True
 
     @property
     def tile_id(self) -> int:
@@ -142,14 +162,27 @@ class IntermediateVectorTile:
         """Number of retained raw features."""
         return len(self._heap) + len(self._cells)
 
-    def _entries(self) -> list[tuple[int, int, _TileFeature]]:
-        """All retained (priority, seq, feature) entries in offer order."""
-        return sorted(list(self._heap) + list(self._cells.values()), key=lambda e: e[1])
+    def _entries(self) -> list[tuple[int, int, _TileFeature, bool]]:
+        """All retained ``(priority, seq, feature, as_dot)`` entries in offer order."""
+        entries = [(p, q, f, False) for (p, q, f) in self._heap]
+        entries.extend((p, q, f, True) for (p, q, f) in self._cells.values())
+        entries.sort(key=lambda e: e[1])
+        return entries
 
     @property
     def _features(self) -> list[_TileFeature]:
         """Retained features (offer order); kept for introspection."""
         return [entry[2] for entry in self._entries()]
+
+    @property
+    def full_features(self) -> list[_TileFeature]:
+        """Features kept in full (the top-k larger than a pixel)."""
+        return [entry[2] for entry in sorted(self._heap, key=lambda e: e[1])]
+
+    @property
+    def dot_features(self) -> list[_TileFeature]:
+        """Features kept as one-pixel dots."""
+        return [entry[2] for entry in sorted(self._cells.values(), key=lambda e: e[1])]
 
     def add_feature(
         self,
@@ -173,13 +206,8 @@ class IntermediateVectorTile:
             priority = feature_priority(shapely.to_wkb(geometry))
         priority = int(priority)
 
-        cell = self.dot_cell(geometry.bounds)
-        if cell is not None:
-            current = self._cells.get(cell)
-            if current is not None and priority <= current[0]:
-                return False
-        elif len(self._heap) >= self.feature_capacity and priority <= self._heap[0][0]:
-            return False
+        cell, small, size16 = self.place(geometry.bounds)
+        priority = self.combine_priority(size16, priority)
 
         clean_properties = {
             key: value
@@ -189,20 +217,25 @@ class IntermediateVectorTile:
         entry = (priority, self._seq, _TileFeature(geometry, clean_properties))
         self._seq += 1
 
-        if cell is not None:
-            self._cells[cell] = entry
-        elif len(self._heap) < self.feature_capacity:
+        if small:
+            return self._offer_cell(cell, entry)
+        if len(self._heap) < self.feature_capacity:
             heapq.heappush(self._heap, entry)
-        else:
-            heapq.heapreplace(self._heap, entry)
+            return True
+        if priority <= self._heap[0][0]:
+            # did not make the cut: a dot instead
+            return self._offer_cell(cell, entry)
+        evicted = heapq.heapreplace(self._heap, entry)
+        self._offer_cell(self.place(evicted[2].geometry.bounds)[0], evicted)
         return True
 
     def simplify_geometry(self, geometry: Any) -> list[Any]:
         """Return simplified tile-pixel geometries ready for MVT encoding."""
         return self._tile_geometry(geometry)[0]
 
-    def _tile_geometry(self, geometry: Any) -> tuple[list[Any], bool]:
-        """Tile-pixel geometries plus whether the feature became a *dot*."""
+    def _tile_geometry(self, geometry: Any, as_dot: bool = False) -> tuple[list[Any], bool]:
+        """Tile-pixel geometries plus whether the feature became a *dot*.
+        ``as_dot`` forces the dot form (a feature that did not make the top-k)."""
         geometry = affine_transform(
             geometry,
             (
@@ -216,8 +249,8 @@ class IntermediateVectorTile:
         )
 
         minx, miny, maxx, maxy = geometry.bounds
-        if (maxx - minx) <= self.cell and (maxy - miny) <= self.cell:
-            # A sub-pixel feature becomes a one-pixel shape of its own kind.
+        if as_dot or ((maxx - minx) <= self.cell and (maxy - miny) <= self.cell):
+            # A sub-pixel (or demoted) feature becomes a one-pixel shape of its own kind.
             cx, cy = (minx + maxx) * 0.5, (miny + maxy) * 0.5
             lo, hi = -self.buffer, self.extent + self.buffer
             if cx < lo or cy < lo or cx > hi or cy > hi:
@@ -260,23 +293,26 @@ class IntermediateVectorTile:
         # Sort by priority (stable: self's entries win ties deterministically).
         combined.sort(key=lambda item: item[0], reverse=True)
         kept = combined[: self.feature_capacity]
+        demoted = combined[self.feature_capacity:]
 
         self._heap = []
         self._seq = 0
         for priority, feature in kept:
             heapq.heappush(self._heap, (priority, self._seq, feature))
             self._seq += 1
-        # Pixel cells: the higher priority wins; self keeps ties.
+        # Pixel cells: the higher priority wins; self keeps ties. Features
+        # that lost their place in the top-k become dots.
         for cell, (priority, _, feature) in other._cells.items():
-            current = self._cells.get(cell)
-            if current is None or priority > current[0]:
-                self._cells[cell] = (priority, self._seq, feature)
-                self._seq += 1
+            self._offer_cell(cell, (priority, self._seq, feature))
+            self._seq += 1
+        for priority, feature in demoted:
+            self._offer_cell(self.place(feature.geometry.bounds)[0], (priority, self._seq, feature))
+            self._seq += 1
         self._features_seen += other._features_seen
 
     def write_features(self, path) -> None:
         """Write retained features, priorities, and seen count to disk."""
-        entries = self._entries()
+        entries = [e[:3] for e in self._entries()]
         table = pa.table(
             {
                 "geometry": pa.array(
@@ -345,8 +381,8 @@ class IntermediateVectorTile:
         # them as bare dots (attributes stay reachable through the lookup).
         strip_point_attrs = len(self._cells) > self.feature_capacity
         out = []
-        for _, _, feature in self._entries():
-            geometries, is_dot = self._tile_geometry(feature.geometry)
+        for _, _, feature, as_dot in self._entries():
+            geometries, is_dot = self._tile_geometry(feature.geometry, as_dot)
             for geometry in geometries:
                 bare = is_dot or (strip_point_attrs and geometry.geom_type == "Point")
                 out.append(

@@ -41,7 +41,7 @@ use crate::geom::mercator::{lonlat_to_merc, tile_width, WORLD_MAX, WORLD_MIN};
 use crate::geom::{merc_bbox_to_lonlat, GeomKind, Geometry, TileId, TileTransform};
 use crate::mvt::{LayerBuilder, TileWriter};
 use crate::pq::{arrow_value, wkb_at, BBOX_COLS};
-use crate::tiler::{dot_cell, sub_pixel, to_tile_geometry, Dataset, Params, LAYER_NAME};
+use crate::tiler::{place, priority, sub_pixel, to_tile_geometry, Dataset, Params, LAYER_NAME};
 
 const BATCH_SIZE: usize = 8192;
 
@@ -70,11 +70,14 @@ impl Hasher for FxHasher {
 type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 /// `(priority, row group id, row)` — a min-heap on priority keeps the top-k.
-type Entry = (u32, u32, u32);
-type Heap = BinaryHeap<Reverse<Entry>>;
+type Entry = (u64, u32, u32);
+/// heap entries also remember the pixel cell to fall back to when evicted
+type HeapEntry = (u64, u32, u32, (i32, i32));
+type Heap = BinaryHeap<Reverse<HeapEntry>>;
 
-/// Per-tile selection state: top-k of the features larger than a display
-/// pixel, and the best sub-pixel feature per pixel cell.
+/// Per-tile selection state: top-k (by size, then hash) of the features
+/// larger than a display pixel, and one dot per pixel cell for everything
+/// else (sub-pixel features and the larger ones that did not make the cut).
 #[derive(Default)]
 struct TileSel {
     heap: Heap,
@@ -83,44 +86,58 @@ struct TileSel {
 
 impl TileSel {
     #[inline]
-    fn offer(&mut self, cell: Option<(i32, i32)>, e: Entry, k: usize) {
-        match cell {
-            Some(c) => match self.cells.get_mut(&c) {
-                Some(cur) if e.0 <= cur.0 => {}
-                Some(cur) => *cur = e,
-                None => {
-                    self.cells.insert(c, e);
-                }
-            },
-            None => push_capped(&mut self.heap, e, k),
+    fn offer_cell(&mut self, c: (i32, i32), e: Entry) {
+        match self.cells.get_mut(&c) {
+            Some(cur) if e.0 <= cur.0 => {}
+            Some(cur) => *cur = e,
+            None => {
+                self.cells.insert(c, e);
+            }
+        }
+    }
+    #[inline]
+    fn offer(&mut self, cell: (i32, i32), small: bool, e: Entry, k: usize) {
+        if small {
+            self.offer_cell(cell, e);
+        } else if let Some(evicted) = push_capped(&mut self.heap, (e.0, e.1, e.2, cell), k) {
+            self.offer_cell(evicted.3, (evicted.0, evicted.1, evicted.2));
         }
     }
     fn merge_from(&mut self, other: TileSel, k: usize) {
         for Reverse(e) in other.heap.into_iter() {
-            push_capped(&mut self.heap, e, k);
+            self.offer(e.3, false, (e.0, e.1, e.2), k);
         }
         for (c, e) in other.cells {
-            self.offer(Some(c), e, k);
+            self.offer_cell(c, e);
         }
     }
     fn len(&self) -> usize {
         self.heap.len() + self.cells.len()
     }
-    fn into_entries(self) -> impl Iterator<Item = Entry> {
-        self.heap.into_iter().map(|Reverse(e)| e).chain(self.cells.into_values())
+    /// `(entry, as_dot)`
+    fn into_entries(self) -> impl Iterator<Item = (Entry, bool)> {
+        self.heap
+            .into_iter()
+            .map(|Reverse(e)| ((e.0, e.1, e.2), false))
+            .chain(self.cells.into_values().map(|e| (e, true)))
     }
 }
 
+/// Push with capacity `k`; returns the entry that lost its place (the
+/// rejected candidate itself, or the evicted minimum), if any.
 #[inline]
-fn push_capped(h: &mut Heap, e: Entry, k: usize) {
+fn push_capped(h: &mut Heap, e: HeapEntry, k: usize) -> Option<HeapEntry> {
     if h.len() >= k {
         // starlet: a candidate replaces the current minimum only if strictly higher
         if e.0 <= h.peek().unwrap().0 .0 {
-            return;
+            return Some(e);
         }
-        h.pop();
+        let Reverse(out) = h.pop().unwrap();
+        h.push(Reverse(e));
+        return Some(out);
     }
     h.push(Reverse(e));
+    None
 }
 
 #[inline]
@@ -290,11 +307,13 @@ impl Dataset {
                                 continue;
                             }
                             n_cand += slots.len() as u64;
-                            let prio = crc32fast::hash(w);
+                            let crc = crc32fast::hash(w);
                             let row = (offs[bi] + i) as u32;
                             for &s in &slots {
-                                let c = dot_cell(&rb, &wanted.tts[s as usize], cell);
-                                acc.entry(s).or_default().offer(c, (prio, rid as u32, row), k);
+                                let pl = place(&rb, &wanted.tts[s as usize], cell);
+                                acc.entry(s)
+                                    .or_default()
+                                    .offer(pl.cell, pl.small, (priority(pl.size16, crc), rid as u32, row), k);
                             }
                         }
                     }
@@ -318,7 +337,7 @@ impl Dataset {
         stats.candidates = candidates.load(Ordering::Relaxed);
 
         // ---- regroup winners by row group ------------------------------------
-        let mut by_rg: Vec<Vec<(u32, u32)>> = vec![Vec::new(); rgs.len()]; // (row, slot)
+        let mut by_rg: Vec<Vec<(u32, u32, bool)>> = vec![Vec::new(); rgs.len()]; // (row, slot, as_dot)
         let mut remaining: Vec<AtomicUsize> = Vec::with_capacity(wanted.ids.len());
         remaining.resize_with(wanted.ids.len(), || AtomicUsize::new(0));
         let mut total: u64 = 0;
@@ -329,8 +348,8 @@ impl Dataset {
             remaining[slot as usize].store(sel.len(), Ordering::Relaxed);
             strip_point_attrs[slot as usize] = sel.cells.len() > k;
             total += sel.len() as u64;
-            for (_, rid, row) in sel.into_entries() {
-                by_rg[rid as usize].push((row, slot));
+            for ((_, rid, row), as_dot) in sel.into_entries() {
+                by_rg[rid as usize].push((row, slot, as_dot));
             }
         }
         stats.features = total;
@@ -399,10 +418,10 @@ impl Dataset {
                             arrow_value(b.column(ci), ri).map(|v| (name.as_str(), v))
                         })
                         .collect();
-                    for &(_, slot) in &winners[i..j] {
+                    for &(_, slot, as_dot) in &winners[i..j] {
                         let slot = slot as usize;
                         if let Some(g) = geom.as_ref() {
-                            if let Some((tg, is_dot)) = to_tile_geometry(g, &wanted.tts[slot], p) {
+                            if let Some((tg, is_dot)) = to_tile_geometry(g, &wanted.tts[slot], p, as_dot) {
                                 let mut guard = builders[slot].lock();
                                 if let Some(lb) = guard.as_mut() {
                                     tags.clear();
@@ -474,14 +493,26 @@ mod tests {
     }
 
     #[test]
-    fn push_capped_keeps_top_k_strictly() {
+    fn push_capped_keeps_top_k_strictly_and_returns_the_loser() {
+        let c = (0, 0);
         let mut h = Heap::new();
-        push_capped(&mut h, (5, 0, 0), 2);
-        push_capped(&mut h, (7, 0, 1), 2);
-        push_capped(&mut h, (5, 0, 2), 2); // equal to min: rejected
-        push_capped(&mut h, (6, 0, 3), 2); // replaces the 5
-        let mut got: Vec<Entry> = h.into_iter().map(|Reverse(e)| e).collect();
+        assert!(push_capped(&mut h, (5, 0, 0, c), 2).is_none());
+        assert!(push_capped(&mut h, (7, 0, 1, c), 2).is_none());
+        assert_eq!(push_capped(&mut h, (5, 0, 2, c), 2), Some((5, 0, 2, c))); // equal to min: rejected
+        assert_eq!(push_capped(&mut h, (6, 0, 3, c), 2), Some((5, 0, 0, c))); // evicts the 5
+        let mut got: Vec<HeapEntry> = h.into_iter().map(|Reverse(e)| e).collect();
         got.sort();
-        assert_eq!(got, vec![(6, 0, 3), (7, 0, 1)]);
+        assert_eq!(got, vec![(6, 0, 3, c), (7, 0, 1, c)]);
+    }
+
+    #[test]
+    fn demoted_large_features_become_dots() {
+        let mut sel = TileSel::default();
+        sel.offer((1, 1), false, (priority(50, 1), 0, 0), 1);
+        sel.offer((2, 2), false, (priority(90, 1), 0, 1), 1); // evicts the first -> dot in (1,1)
+        sel.offer((3, 3), false, (priority(10, 1), 0, 2), 1); // rejected -> dot in (3,3)
+        assert_eq!(sel.heap.len(), 1);
+        assert_eq!(sel.cells.len(), 2);
+        assert!(sel.cells.contains_key(&(1, 1)) && sel.cells.contains_key(&(3, 3)));
     }
 }
