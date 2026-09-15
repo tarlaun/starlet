@@ -384,16 +384,48 @@ class IntermediateVectorTile:
         # them as bare dots (attributes stay reachable through the lookup).
         strip_point_attrs = len(self._cells) > self.feature_capacity
         out = []
+        poly_dots: list[tuple[float, float]] = []
+        line_dots: list[tuple[float, float]] = []
         for _, _, feature, as_dot in self._entries():
             geometries, is_dot = self._tile_geometry(feature.geometry, as_dot)
             for geometry in geometries:
-                bare = is_dot or (strip_point_attrs and geometry.geom_type == "Point")
+                if is_dot:
+                    # packed below into one feature per kind
+                    c = geometry.centroid
+                    (poly_dots if geometry.geom_type == "Polygon" else line_dots).append((c.x, c.y))
+                    continue
+                bare = strip_point_attrs and geometry.geom_type == "Point"
                 out.append(
                     {
                         "geometry": geometry,
                         "properties": {} if bare else self._select_properties(feature.properties),
                     }
                 )
+        out.extend(self._packed_dots(poly_dots, line_dots))
+        return out
+
+    def _packed_dots(self, poly_dots, line_dots) -> list[dict[str, Any]]:
+        """Polygon / line dots as one MultiPolygon / MultiLineString feature
+        each, sorted by position (y-down, then x — the Rust engine's order) so
+        delta-encoded coordinates stay small."""
+        from shapely.geometry import MultiLineString, MultiPolygon
+
+        h = self.cell * 0.5
+        key = lambda c: (round(self.extent - c[1]), round(c[0]))  # noqa: E731
+        out = []
+        if poly_dots:
+            poly_dots.sort(key=key)
+            squares = [
+                Polygon([(cx - h, cy + h), (cx + h, cy + h), (cx + h, cy - h), (cx - h, cy - h), (cx - h, cy + h)])
+                for cx, cy in poly_dots
+            ]
+            out.append({"geometry": MultiPolygon(squares), "properties": {}})
+        if line_dots:
+            line_dots.sort(key=key)
+            out.append({
+                "geometry": MultiLineString([[(cx - h, cy), (cx + h, cy)] for cx, cy in line_dots]),
+                "properties": {},
+            })
         return out
 
     def _select_properties(self, properties: dict[str, Any]) -> dict[str, Any]:

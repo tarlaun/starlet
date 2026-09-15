@@ -41,7 +41,7 @@ use crate::geom::mercator::{lonlat_to_merc, tile_width, WORLD_MAX, WORLD_MIN};
 use crate::geom::{merc_bbox_to_lonlat, GeomKind, Geometry, TileId, TileTransform};
 use crate::mvt::{LayerBuilder, TileWriter};
 use crate::pq::{arrow_value, wkb_at, BBOX_COLS};
-use crate::tiler::{place, priority, sub_pixel, to_tile_geometry, Dataset, Params, LAYER_NAME};
+use crate::tiler::{place, priority, sub_pixel, tile_feature, Dataset, DotBuffer, Params, TileFeature, LAYER_NAME};
 
 const BATCH_SIZE: usize = 8192;
 
@@ -356,9 +356,9 @@ impl Dataset {
         by_rg.par_iter_mut().for_each(|v| v.sort_unstable());
 
         // ---- pass 2: encode --------------------------------------------------
-        let builders: Vec<Mutex<Option<LayerBuilder>>> = (0..wanted.ids.len())
+        let builders: Vec<Mutex<Option<(LayerBuilder, DotBuffer)>>> = (0..wanted.ids.len())
             .map(|slot| Mutex::new(if remaining[slot].load(Ordering::Relaxed) > 0 {
-                Some(LayerBuilder::new(LAYER_NAME, p.extent))
+                Some((LayerBuilder::new(LAYER_NAME, p.extent), DotBuffer::default()))
             } else {
                 None
             }))
@@ -367,7 +367,8 @@ impl Dataset {
 
         let finish_tile = |slot: usize| -> Result<()> {
             let lb = builders[slot].lock().take();
-            if let Some(lb) = lb {
+            if let Some((mut lb, mut dots)) = lb {
+                dots.emit(&mut lb, p);
                 if lb.feature_count > 0 {
                     let mut w = TileWriter::new();
                     w.add_layer(&lb);
@@ -421,20 +422,29 @@ impl Dataset {
                     for &(_, slot, as_dot) in &winners[i..j] {
                         let slot = slot as usize;
                         if let Some(g) = geom.as_ref() {
-                            if let Some((tg, is_dot)) = to_tile_geometry(g, &wanted.tts[slot], p, as_dot) {
-                                let mut guard = builders[slot].lock();
-                                if let Some(lb) = guard.as_mut() {
-                                    tags.clear();
-                                    let bare = is_dot
-                                        || (strip_point_attrs[slot] && tg.kind == GeomKind::Point && sub_pixel(&tg, p));
-                                    if !bare {
-                                        for (name, v) in &attrs {
-                                            let ki = lb.key(name);
-                                            let vi = lb.value(v);
-                                            tags.push((ki, vi));
-                                        }
+                            match tile_feature(g, &wanted.tts[slot], p, as_dot) {
+                                None => {}
+                                Some(TileFeature::Dot(c, kind)) => {
+                                    if let Some((_, dots)) = builders[slot].lock().as_mut() {
+                                        dots.push(c, kind);
                                     }
-                                    lb.add_feature(None, &tg, &tags);
+                                }
+                                Some(TileFeature::Full(tg)) => {
+                                    let mut guard = builders[slot].lock();
+                                    if let Some((lb, _)) = guard.as_mut() {
+                                        tags.clear();
+                                        let bare = strip_point_attrs[slot]
+                                            && tg.kind == GeomKind::Point
+                                            && sub_pixel(&tg, p);
+                                        if !bare {
+                                            for (name, v) in &attrs {
+                                                let ki = lb.key(name);
+                                                let vi = lb.value(v);
+                                                tags.push((ki, vi));
+                                            }
+                                        }
+                                        lb.add_feature(None, &tg, &tags);
+                                    }
                                 }
                             }
                         }

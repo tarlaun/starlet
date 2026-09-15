@@ -375,6 +375,7 @@ impl Dataset {
             heap.into_iter().map(|Reverse((_, q, s, r, _))| (q, s, r, false)).collect();
         winners.extend(cells.into_values().map(|(_, q, s, r)| (q, s, r, true)));
         winners.sort_unstable(); // deterministic feature order (offer order)
+        let mut dots = DotBuffer::default();
         for (_, slot, row, as_dot) in winners {
             let (rgc, bi, pi) = &batches[slot];
             let b = &rgc.batches[*bi];
@@ -383,9 +384,16 @@ impl Dataset {
             let Some(w) = wkb_at(b, gi, row as usize) else { continue };
             let Ok(mut g) = Geometry::from_wkb(w) else { continue };
             g.from_lonlat_to_merc();
-            let Some((tg, is_dot)) = to_tile_geometry(&g, &tt, p, as_dot) else { continue };
+            let tg = match tile_feature(&g, &tt, p, as_dot) {
+                None => continue,
+                Some(TileFeature::Dot(c, kind)) => {
+                    dots.push(c, kind);
+                    continue;
+                }
+                Some(TileFeature::Full(tg)) => tg,
+            };
             tags.clear();
-            let bare = is_dot || (strip_point_attrs && tg.kind == GeomKind::Point && sub_pixel(&tg, p));
+            let bare = strip_point_attrs && tg.kind == GeomKind::Point && sub_pixel(&tg, p);
             if !bare {
                 for name in part.attr_cols.iter().filter(|n| p.attrs.allows(n)) {
                     if let Ok(ci) = b.schema().index_of(name) {
@@ -399,6 +407,7 @@ impl Dataset {
             }
             layer.add_feature(None, &tg, &tags);
         }
+        dots.emit(&mut layer, p);
         stats.retained = layer.feature_count as u64;
         let mut w = TileWriter::new();
         w.add_layer(&layer);
@@ -564,6 +573,80 @@ fn bbox_intersects(a: &[f64; 4], b: &[f64; 4]) -> bool {
 pub fn sub_pixel(g: &Geometry, p: &Params) -> bool {
     let bb = g.bbox();
     bb.width() <= p.cell() && bb.height() <= p.cell()
+}
+
+/// A winner ready for encoding: either its full tile-unit geometry (a native
+/// point included) or a polygon / line *dot* at a tile-unit centre.
+pub enum TileFeature {
+    Full(Geometry),
+    Dot([f64; 2], GeomKind),
+}
+
+/// Classify a winner: dots (sub-pixel polygons / lines, or demoted ones)
+/// are returned as centres so the tile can pack them into one feature.
+pub fn tile_feature(g_merc: &Geometry, tt: &TileTransform, p: &Params, as_dot: bool) -> Option<TileFeature> {
+    let (tg, is_dot) = to_tile_geometry(g_merc, tt, p, as_dot)?;
+    if is_dot {
+        let c = tg.bbox().center();
+        Some(TileFeature::Dot(c, tg.kind))
+    } else {
+        Some(TileFeature::Full(tg))
+    }
+}
+
+/// Polygon and line dots of one tile, packed at encode time into a single
+/// MultiPolygon / MultiLineString feature each, sorted by position so the
+/// delta-encoded coordinates (and gzip) stay small: ~7 bytes per dot
+/// instead of ~17 as separate features.
+#[derive(Default)]
+pub struct DotBuffer {
+    pub polys: Vec<[f64; 2]>,
+    pub lines: Vec<[f64; 2]>,
+}
+
+impl DotBuffer {
+    #[inline]
+    pub fn push(&mut self, c: [f64; 2], kind: GeomKind) {
+        match kind {
+            GeomKind::Polygon => self.polys.push(c),
+            GeomKind::Line => self.lines.push(c),
+            GeomKind::Point => {}
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.polys.is_empty() && self.lines.is_empty()
+    }
+    fn sort(v: &mut [[f64; 2]]) {
+        v.sort_by_key(|c| (c[1].round() as i64, c[0].round() as i64));
+    }
+    pub fn emit(&mut self, layer: &mut LayerBuilder, p: &Params) {
+        let h = p.cell() * 0.5;
+        if !self.polys.is_empty() {
+            Self::sort(&mut self.polys);
+            let mut g = Geometry::empty(GeomKind::Polygon);
+            for c in &self.polys {
+                g.polys.push(g.parts.len());
+                g.parts.push(vec![
+                    [c[0] - h, c[1] - h],
+                    [c[0] + h, c[1] - h],
+                    [c[0] + h, c[1] + h],
+                    [c[0] - h, c[1] + h],
+                    [c[0] - h, c[1] - h],
+                ]);
+            }
+            layer.add_feature(None, &g, &[]);
+        }
+        if !self.lines.is_empty() {
+            Self::sort(&mut self.lines);
+            let mut g = Geometry::empty(GeomKind::Line);
+            for c in &self.lines {
+                g.parts.push(vec![[c[0] - h, c[1]], [c[0] + h, c[1]]]);
+            }
+            layer.add_feature(None, &g, &[]);
+        }
+        self.polys.clear();
+        self.lines.clear();
+    }
 }
 
 /// starlet's `simplify_geometry` pipeline on a Mercator geometry. Returns

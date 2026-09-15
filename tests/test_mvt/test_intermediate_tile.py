@@ -260,7 +260,7 @@ def test_sub_pixel_polygon_encodes_as_one_pixel_square_without_attributes():
     by_type = {f["geometry"]["type"]: f for f in decoded}
     assert set(by_type) == {"Polygon", "LineString"} or len(decoded) == 3
     small = [f for f in decoded if f["properties"] == {}]
-    assert len(small) == 2  # the dots carry no attributes
+    assert len(small) == 2  # the dots carry no attributes (one packed feature per kind)
     kinds = sorted(f["geometry"]["type"] for f in small)
     assert kinds == ["LineString", "Polygon"]  # ... but keep their geometry type
     sq = next(f for f in small if f["geometry"]["type"] == "Polygon")
@@ -304,3 +304,13 @@ def test_size_outranks_hash_for_features_larger_than_a_pixel():
     dot = next(f for f in decoded if not f["properties"])
     xs = [c[0] for c in dot["geometry"]["coordinates"][0]]
     assert max(xs) - min(xs) == tile.cell  # demoted feature drawn as a one-pixel square
+
+
+def test_dots_are_packed_into_one_feature_per_kind():
+    tile = IntermediateVectorTile(0, 0, 0, feature_capacity=10)
+    for i in range(5):
+        tile.add_feature(Point(1e6 + i * 3e5, 1e6).buffer(10.0), {"id": i})
+    decoded = mapbox_vector_tile.decode(tile.encode())["layer0"]["features"]
+    assert len(decoded) == 1
+    assert decoded[0]["geometry"]["type"] == "MultiPolygon"
+    assert len(decoded[0]["geometry"]["coordinates"]) == 5
