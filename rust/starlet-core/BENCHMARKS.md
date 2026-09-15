@@ -128,6 +128,43 @@ threshold 50k) on the same input, and its earlier version 5 h 43 min at z7.
 | tile set | 548 tiles | identical set |
 | feature sets, 40 random tiles | — | 40/40 identical |
 
+## 2b. Versus UCR STAR (interactive latency, low-zoom density)
+
+[UCR STAR](https://star.cs.ucr.edu/?OSM2015/parks) serves the same 10M-park
+dataset as **256 px PNG raster tiles at every zoom** (3–6 KB each) and looks
+records up on click with a tiny-MBR query (`features/view.json?mbr=`, ~50 ms).
+A vector tile can never match a bitmap's bytes, so the goal was parity in
+*latency and density*, not size. The path there, on the densest z4 tile
+(`4/8/5`, Europe; `--tile-attributes none`, raw bytes):
+
+| step | z4 densest tile | z0–9 pyramid |
+|---|---:|---:|
+| top-k 25k sample, attributes, collapse-to-point (start) | 2.2 MB | 2.6 GB |
+| raster-consistent selection, 512-px grid | 6.6 MB (185k dots) | — |
+| 256-px grid, no attributes on dots, cap 10k | 2.0 MB | 1.3 GB |
+| dots packed into one MultiPolygon per tile | 1.96 MB | 1.2 GB |
+| quarter-pixel simplification tolerance | **0.97 MB (331 KB gzip)** | **727 MB** |
+
+The `all` attribute policy on the same data is 1.7 MB / 1.3 GB (the OSM tag
+blob is most of it); STAR's PNG for that tile is 3.6 KB.
+
+Matched tiles over Riverside, CA, fetched from a laptop through an SSH
+tunnel to ec-hn (starlet, gzip) and over the Internet (STAR); STAR's numbers
+are the best of two requests, starlet's are cold / warm:
+
+| zoom | STAR PNG | STAR ms | starlet gzip | starlet ms |
+|---:|---:|---:|---:|---:|
+| 2 | 3.6 KB | 43 | 36 KB | 110 / 34 |
+| 4 | 2.8 KB | 28 | 32 KB | 108 / 33 |
+| 6 | 5.5 KB | 23 | 25 KB | 30 / 31 |
+| 8 | 6.0 KB | 24 | 24 KB | 31 / 30 |
+| 10 (on the fly) | 3.2 KB | 22 | 4.9 KB | 243 / 21 |
+| 12–20 (on the fly) | 0.3–2.5 KB | 21–24 | 37–914 B | 23–29 / 21–25 |
+
+Densest European tiles: z2 107 KB gzip 44 ms, z4 331 KB 96 ms, z6 395 KB
+148 ms, z8 268 KB 94 ms (STAR: 3–6 KB, 28–69 ms). Click lookup through
+`/datasets/<ds>/features/at.json`: 44 ms for 2 records with all attributes.
+
 ## 3. Output parity
 
 `tests/test_mvt/test_rust_engine.py` checks Rust against the Python reference
