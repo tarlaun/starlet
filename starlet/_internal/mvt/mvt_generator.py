@@ -216,18 +216,26 @@ class DatasetMVTGenerator:
 
         ds = rust_engine.dataset(self.dataset_dir)
         self.outdir.mkdir(parents=True, exist_ok=True)
-        chunk = 4096
-        written = 0
+        # Push-mode pyramid: two streaming passes over the row groups per
+        # call, memory bounded by per-tile winner *references* plus the tiles
+        # still being filled. Zooms are batched so one call never tracks more
+        # than _RUST_PYRAMID_MAX_TILES tiles at once.
+        bands: list[list[int]] = []
         for z in sorted(tiles_by_zoom):
-            tiles = tiles_by_zoom[z]
-            n = 0
-            for i in range(0, len(tiles), chunk):
-                n += ds.write_tiles(
-                    str(self.outdir), tiles[i:i + chunk],
-                    feature_capacity=self.feature_capacity, extent=self.extent, buffer=self.buffer,
-                )
-            written += n
-            logger.info("DatasetMVTGenerator[rust] z=%d candidates=%d written=%d", z, len(tiles), n)
+            if bands and sum(len(tiles_by_zoom[b]) for b in bands[-1]) + len(tiles_by_zoom[z]) <= _RUST_PYRAMID_MAX_TILES:
+                bands[-1].append(z)
+            else:
+                bands.append([z])
+        for band in bands:
+            tiles = [t for z in band for t in tiles_by_zoom[z]]
+            st = ds.write_pyramid(
+                str(self.outdir), tiles,
+                feature_capacity=self.feature_capacity, extent=self.extent, buffer=self.buffer,
+            )
+            logger.info(
+                "DatasetMVTGenerator[rust] zooms=%s requested=%d written=%d candidates=%d features=%d",
+                band, st["tiles_requested"], st["tiles_written"], st["candidates"], st["features"],
+            )
 
         tile_counts_by_zoom = _discover_tile_counts_by_zoom(self.outdir)
         zoom_levels = [z for z, count in enumerate(tile_counts_by_zoom) if count > 0]
@@ -441,6 +449,7 @@ def _intermediate_tile_filename(z: int, x: int, y: int) -> str:
     return f"{z}-{x}-{y}.pyarrow"
 
 
+_RUST_PYRAMID_MAX_TILES = 1_000_000
 _RUST_DATASET_OK: dict[str, bool] = {}
 
 

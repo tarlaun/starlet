@@ -8,6 +8,7 @@
 pub mod geom;
 pub mod mvt;
 pub mod pq;
+pub mod pyramid;
 pub mod tiler;
 
 use std::path::Path;
@@ -167,6 +168,39 @@ impl PyDataset {
             Ok(n)
         });
         written.map_err(to_py_err)
+    }
+
+    /// Generate a whole pyramid (any mix of zooms) with bounded memory —
+    /// two streaming passes over the row groups instead of per-tile pulls —
+    /// writing each non-empty tile to `<outdir>/<z>/<x>/<y>.mvt` as soon as
+    /// it is complete. Returns a stats dict (`tiles_written`, `candidates`,
+    /// `features`, `row_groups`, `tiles_requested`). Releases the GIL.
+    #[pyo3(signature = (outdir, tiles, feature_capacity = 25000, extent = 4096, buffer = 256))]
+    fn write_pyramid<'py>(
+        &self,
+        py: Python<'py>,
+        outdir: &str,
+        tiles: Vec<(u8, u32, u32)>,
+        feature_capacity: usize,
+        extent: u32,
+        buffer: u32,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let inner = self.inner.clone();
+        let p = Params { feature_capacity, extent, buffer };
+        let out = std::path::PathBuf::from(outdir);
+        let st = py
+            .allow_threads(move || {
+                let ids: Vec<TileId> = tiles.iter().map(|&(z, x, y)| TileId::new(z, x, y)).collect();
+                inner.write_pyramid(&out, &ids, &p)
+            })
+            .map_err(to_py_err)?;
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("tiles_requested", st.tiles_requested)?;
+        d.set_item("tiles_written", st.tiles_written)?;
+        d.set_item("row_groups", st.row_groups)?;
+        d.set_item("candidates", st.candidates)?;
+        d.set_item("features", st.features)?;
+        Ok(d)
     }
 }
 

@@ -140,3 +140,44 @@ def test_feature_capacity_keeps_top_k_consistently_with_python(tmp_path):
     rs = rust_engine.generate_tile(str(ds), 1, 0, 0, feature_capacity=2, extent=4096, buffer=256)
     assert len(_props(rs)) == 2
     assert _props(rs) == _props(py)  # same crc32(WKB) priority => same survivors
+
+
+def _decoded(tile_bytes):
+    """Set of (properties, geometry) pairs for cross-engine comparison."""
+    dec = mapbox_vector_tile.decode(tile_bytes)
+    out = set()
+    for layer in dec.values():
+        for f in layer["features"]:
+            out.add((json.dumps(f["properties"], sort_keys=True), json.dumps(f["geometry"], sort_keys=True)))
+    return out
+
+
+@pytest.mark.parametrize("with_bbox", [True, False])
+def test_write_pyramid_matches_per_tile_generation(tmp_path, with_bbox):
+    """The push-mode pyramid (two streaming passes, bounded memory) must
+    produce exactly the tiles and features the per-tile generator does,
+    across several zooms in one call, including the empty tiles it skips."""
+    ds = _write_dataset(tmp_path / "ds", with_bbox=with_bbox)
+    rust_engine.invalidate()
+    handle = rust_engine.dataset(ds)
+    tiles = [(0, 0, 0)] + [(1, x, y) for x in range(2) for y in range(2)] + [(2, x, y) for x in range(4) for y in range(4)]
+    out = tmp_path / "pyr"
+    st = handle.write_pyramid(str(out), tiles, feature_capacity=10, extent=4096, buffer=256)
+    assert st["tiles_requested"] == len(tiles)
+
+    expected_written = 0
+    for (z, x, y) in tiles:
+        ref = handle.generate_tile(z, x, y, feature_capacity=10, extent=4096, buffer=256)
+        path = out / str(z) / str(x) / f"{y}.mvt"
+        if _props(ref):
+            expected_written += 1
+            assert path.exists(), f"{z}/{x}/{y} missing"
+            assert _decoded(path.read_bytes()) == _decoded(ref), f"{z}/{x}/{y} differs"
+        else:
+            assert not path.exists(), f"{z}/{x}/{y} should be empty"
+    assert st["tiles_written"] == expected_written
+    # capacity binds at z0 (4 features, cap 2): same survivors as pull mode
+    st2 = handle.write_pyramid(str(tmp_path / "pyr2"), [(0, 0, 0)], feature_capacity=2, extent=4096, buffer=256)
+    assert st2["features"] == 2
+    ref2 = handle.generate_tile(0, 0, 0, feature_capacity=2, extent=4096, buffer=256)
+    assert _decoded((tmp_path / "pyr2" / "0" / "0" / "0.mvt").read_bytes()) == _decoded(ref2)
