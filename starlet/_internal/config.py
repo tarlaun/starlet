@@ -40,6 +40,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "row_group_cache": 256,
         "python_pyramid": "pull",
         "batch_row_group_cache": 32,
+        "push_max_tiles": 1024,
         "extent": 4096,
         "buffer": 256,
         "pmtiles_compression": "gzip",

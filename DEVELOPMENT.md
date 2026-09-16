@@ -135,6 +135,26 @@ three places:
 Document it in the README's option table (if user-facing) and in
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
+## Tile engines
+
+Both engines implement the same algorithm and produce the same tiles
+(byte-identical when no clipping or simplification is involved; otherwise the
+same shapes, since the two Douglas-Peucker / clipping implementations differ in
+vertex choice):
+
+| | pure Python (`starlet/_internal/mvt/fast_tile.py`, `mvt_encoder.py`, `python_pyramid.py`) | Rust (`rust/starlet-core`) |
+|---|---|---|
+| selection | numpy: priority `(size, crc32)`, top-k in full, one dot per pixel cell | same, per row |
+| geometry | shapely array ops: transform, `simplify`, `clip_by_rect` | own DP + Sutherland-Hodgman |
+| encoding | numpy varints (`mvt_encoder.LayerEncoder`) | `mvt/encode.rs` |
+| row groups | statistics-pruned, decoded once into an LRU (`mvt.row_group_cache`) | same (`rg_cache`) |
+| pyramid | push pass for low zooms + tile pull in a process pool (`mvt.python_pyramid = pull`); `mapreduce` keeps the old spill-to-disk path | two streaming passes (`write_pyramid`) |
+
+`STARLET_ENGINE=python` forces the Python engine; `rust` also routes batch
+pyramids through the Rust core; the default `auto` uses Rust for on-the-fly
+tiles when it is installed. `tests/test_mvt/test_rust_engine.py` asserts the
+two engines agree.
+
 ## Rust acceleration core (optional)
 
 `rust/starlet-core/` is a PyO3/maturin extension (`starlet_core`) that

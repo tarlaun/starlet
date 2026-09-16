@@ -252,7 +252,8 @@ class DatasetMVTGenerator:
         # Zooms with few tiles (each touching most of the dataset) go through
         # the push-mode pass, which streams every row group once for all of
         # them; the rest are pulled tile by tile.
-        push_zooms = [z for z in sorted(tiles_by_zoom) if len(tiles_by_zoom[z]) <= 4 * self.workers]
+        push_max = int(config_value("mvt", "push_max_tiles"))
+        push_zooms = [z for z in sorted(tiles_by_zoom) if len(tiles_by_zoom[z]) <= push_max]
         with ProcessPoolExecutor(max_workers=self.workers) as executor:
             if push_zooms:
                 from starlet._internal.mvt.python_pyramid import run_push

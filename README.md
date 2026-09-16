@@ -145,10 +145,13 @@ PMTiles archive or `.mvt` files on disk, then generated on the fly from the
 Parquet tiles when you zoom past the pre-built levels — so you can serve a
 dataset even without pre-generating every zoom.
 
-An optional Rust core (`starlet_core`, in `rust/starlet-core`) makes on-the-fly
-tiles and batch pyramid generation many times faster and lets you zoom
-interactively to level 20 on large datasets; starlet uses it automatically when
-it is installed. See [DEVELOPMENT.md](DEVELOPMENT.md#rust-acceleration-core-optional).
+Tile generation is vectorised (numpy + shapely arrays, a numpy MVT encoder,
+a bounded cache of decoded Parquet row groups), so the pure-Python install
+serves on-the-fly tiles in milliseconds at high zoom and builds pyramids
+without intermediate files. An optional Rust core (`starlet_core`, in
+`rust/starlet-core`) produces the same tiles another 5–30× faster and is used
+automatically when installed. See
+[DEVELOPMENT.md](DEVELOPMENT.md#rust-acceleration-core-optional).
 
 ## Configuration
 
