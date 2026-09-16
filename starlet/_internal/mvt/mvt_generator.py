@@ -249,8 +249,20 @@ class DatasetMVTGenerator:
             row_group_cache_size=int(config_value("mvt", "batch_row_group_cache")),
         )
         chunk = 64
+        # Zooms with few tiles (each touching most of the dataset) go through
+        # the push-mode pass, which streams every row group once for all of
+        # them; the rest are pulled tile by tile.
+        push_zooms = [z for z in sorted(tiles_by_zoom) if len(tiles_by_zoom[z]) <= 4 * self.workers]
         with ProcessPoolExecutor(max_workers=self.workers) as executor:
+            if push_zooms:
+                from starlet._internal.mvt.python_pyramid import run_push
+
+                push_tiles = [t for z in push_zooms for t in tiles_by_zoom[z]]
+                written = run_push(str(self.dataset_dir), str(self.outdir), push_tiles, params, executor, self.workers)
+                logger.info("DatasetMVTGenerator[python] push zooms=%s candidates=%d written=%d", push_zooms, len(push_tiles), written)
             for z in sorted(tiles_by_zoom):
+                if z in push_zooms:
+                    continue
                 tiles = tiles_by_zoom[z]
                 futures = [
                     executor.submit(_python_pyramid_chunk, str(self.dataset_dir), str(self.outdir), tiles[i:i + chunk], params)

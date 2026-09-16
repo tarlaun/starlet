@@ -102,22 +102,16 @@ def _crc32_array(wkb_list: list) -> np.ndarray:
     return np.fromiter((crc(w) if w is not None else 0 for w in wkb_list), dtype=np.uint32, count=len(wkb_list))
 
 
-def select(
+def classify(
     frame: TileFrame,
     lon0: np.ndarray,
     lat0: np.ndarray,
     lon1: np.ndarray,
     lat1: np.ndarray,
     crc: np.ndarray,
-    feature_capacity: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Raster-consistent selection over candidate bboxes (EPSG:4326).
-
-    Returns ``(full_idx, dot_idx, dot_cx, dot_cy)``: indices of the features
-    kept in full, indices of the features kept as dots, and the dots' tile-
-    unit centres. ``dot_idx`` is one per pixel cell (best priority).
-    """
-    k = max(1, int(feature_capacity))
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per-candidate ``(priority, pixel-cell key, is sub-pixel, centre x, centre y)``
+    for EPSG:4326 bboxes against a tile (priority = size, then crc32)."""
     ax, ay = lonlat_to_merc(lon0, lat0)
     bx, by = lonlat_to_merc(lon1, lat1)
     x0, y0 = frame.to_tile(ax, ay)
@@ -133,7 +127,16 @@ def select(
     cellx = np.floor(cx / cell).astype(np.int64)
     celly = np.floor(cy / cell).astype(np.int64)
     cellkey = ((celly + (1 << 20)) << 21) + (cellx + (1 << 20))
+    return prio, cellkey, small, cx, cy
 
+
+def select_from(prio: np.ndarray, cellkey: np.ndarray, small: np.ndarray, feature_capacity: int) -> tuple[np.ndarray, np.ndarray]:
+    """Raster-consistent selection: the ``feature_capacity`` best non-small
+    candidates in full, every other candidate one-per-pixel-cell as a dot.
+    Returns ``(full_idx, dot_idx)`` (indices into the inputs; ``full_idx``
+    sorted, i.e. offer order). Also correct for merging partial selections:
+    treat a partial's dots as ``small`` and its fulls as not small."""
+    k = max(1, int(feature_capacity))
     large = np.flatnonzero(~small)
     if len(large) > k:
         order = np.argsort(-prio[large], kind="stable")
@@ -145,18 +148,32 @@ def select(
     dot_cand = np.concatenate((np.flatnonzero(small), demoted))
     if len(dot_cand):
         keys = cellkey[dot_cand]
-        # best priority per cell; ties -> earliest offered (stable)
-        order = np.lexsort((dot_cand, -prio[dot_cand], keys))
+        order = np.lexsort((dot_cand, -prio[dot_cand], keys))  # best priority per cell; ties -> earliest
         skeys = keys[order]
         first = np.ones(len(order), dtype=bool)
         first[1:] = skeys[1:] != skeys[:-1]
         dots = dot_cand[order[first]]
     else:
         dots = np.zeros(0, dtype=np.int64)
-    return np.sort(full), dots, cx[dots], cy[dots]
+    return np.sort(full), dots
 
 
-def _tile_geometries(frame: TileFrame, geoms: np.ndarray, tolerance: float) -> np.ndarray:
+def select(
+    frame: TileFrame,
+    lon0: np.ndarray,
+    lat0: np.ndarray,
+    lon1: np.ndarray,
+    lat1: np.ndarray,
+    crc: np.ndarray,
+    feature_capacity: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """``(full_idx, dot_idx, dot_cx, dot_cy)`` — see :func:`classify` / :func:`select_from`."""
+    prio, cellkey, small, cx, cy = classify(frame, lon0, lat0, lon1, lat1, crc)
+    full, dots = select_from(prio, cellkey, small, feature_capacity)
+    return full, dots, cx[dots], cy[dots]
+
+
+def tile_geometries(frame: TileFrame, geoms: np.ndarray, tolerance: float) -> np.ndarray:
     """Project lon/lat geometries to tile units, simplify, clip, drop slivers.
     Returns an object array (None where the feature vanished)."""
     if len(geoms) == 0:
@@ -427,7 +444,7 @@ def generate_tile_ex(
     indiv = np.sort(np.concatenate((full, dots[point_dots])))
     is_full = np.isin(indiv, full)
     geoms = shapely.from_wkb(wkb_of(indiv), on_invalid="ignore") if len(indiv) else np.zeros(0, dtype=object)
-    tgeoms = _tile_geometries(frame, geoms, tolerance) if len(indiv) else geoms
+    tgeoms = tile_geometries(frame, geoms, tolerance) if len(indiv) else geoms
     # native points that turned out sub-pixel keep their point form (no simplification / clipping)
     cmds, types = geometry_commands(tgeoms)
     need_props = np.ones(len(indiv), dtype=bool)
