@@ -30,6 +30,11 @@ GEOM_LINE = 2
 GEOM_POLYGON = 3
 
 
+def round_half_away(v: np.ndarray) -> np.ndarray:
+    """Rust's ``f64::round`` (half away from zero), unlike numpy's half-to-even."""
+    return np.where(v >= 0, np.floor(v + 0.5), np.ceil(v - 0.5))
+
+
 # ---------------------------------------------------------------------------
 # protobuf helpers
 # ---------------------------------------------------------------------------
@@ -144,8 +149,8 @@ def _ring_tokens(
             X = X[src]
             Y = Y[src]
 
-    Xi = np.rint(X).astype(np.int64)
-    Yi = np.rint(Y).astype(np.int64)
+    Xi = round_half_away(X).astype(np.int64)
+    Yi = round_half_away(Y).astype(np.int64)
     feat_of_vertex = feat_of_ring[ring_of_vertex]
     dx, dy = _deltas(Xi, Yi, feat_of_vertex)
     zx = _zigzag(dx)
@@ -170,8 +175,8 @@ def _ring_tokens(
 def _point_tokens(X: np.ndarray, Y: np.ndarray, feat_of_vertex: np.ndarray, n_feats: int):
     if len(X) == 0:
         return np.zeros(0, dtype=np.uint64), np.zeros(0, dtype=np.int64)
-    Xi = np.rint(X).astype(np.int64)
-    Yi = np.rint(Y).astype(np.int64)
+    Xi = round_half_away(X).astype(np.int64)
+    Yi = round_half_away(Y).astype(np.int64)
     dx, dy = _deltas(Xi, Yi, feat_of_vertex)
     n_per = np.bincount(feat_of_vertex, minlength=n_feats).astype(np.int64)
     used = np.flatnonzero(n_per)
@@ -296,7 +301,7 @@ def packed_square_dots(centers: np.ndarray, half: float) -> bytes | None:
     if len(centers) == 0:
         return None
     c = np.asarray(centers, dtype=np.float64)
-    order = np.lexsort((np.rint(c[:, 0]), np.rint(c[:, 1])))
+    order = np.lexsort((round_half_away(c[:, 0]), round_half_away(c[:, 1])))
     c = c[order]
     n = len(c)
     X = np.empty(4 * n)
@@ -319,7 +324,7 @@ def packed_segment_dots(centers: np.ndarray, half: float) -> bytes | None:
     if len(centers) == 0:
         return None
     c = np.asarray(centers, dtype=np.float64)
-    order = np.lexsort((np.rint(c[:, 0]), np.rint(c[:, 1])))
+    order = np.lexsort((round_half_away(c[:, 0]), round_half_away(c[:, 1])))
     c = c[order]
     n = len(c)
     X = np.empty(2 * n)
