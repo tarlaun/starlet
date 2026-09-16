@@ -38,6 +38,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "tile_attributes": "all",
         "simplify_tolerance": "auto",
         "row_group_cache": 256,
+        "python_pyramid": "pull",
+        "batch_row_group_cache": 32,
         "extent": 4096,
         "buffer": 256,
         "pmtiles_compression": "gzip",

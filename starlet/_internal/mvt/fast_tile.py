@@ -315,6 +315,27 @@ def generate_tile(
     index: ParquetIndex | None = None,
 ) -> bytes:
     """One MVT tile from a starlet dataset directory (EPSG:4326 partitions)."""
+    return generate_tile_ex(
+        dataset_path, tile_id, feature_capacity=feature_capacity, extent=extent, buffer=buffer,
+        tile_attributes=tile_attributes, simplify_tolerance=simplify_tolerance, layer_name=layer_name,
+        index=index, row_group_cache_size=None,
+    )[0]
+
+
+def generate_tile_ex(
+    dataset_path: str | Path,
+    tile_id: tuple[int, int, int],
+    *,
+    feature_capacity: int,
+    extent: int,
+    buffer: int,
+    tile_attributes: Any = None,
+    simplify_tolerance: Any = None,
+    layer_name: str = "layer0",
+    index: ParquetIndex | None = None,
+    row_group_cache_size: int | None = None,
+) -> tuple[bytes, int]:
+    """``(tile bytes, number of features)``."""
     z, x, y = tile_id
     frame = TileFrame(z, x, y, extent, buffer)
     attrs_policy = normalize_tile_attributes(tile_attributes)
@@ -322,7 +343,7 @@ def generate_tile(
     parquet_dir = Path(dataset_path) / "parquet_tiles"
     if index is None:
         index = ParquetIndex(parquet_dir)
-    cache = row_group_cache(parquet_dir, index)
+    cache = row_group_cache(parquet_dir, index, row_group_cache_size)
 
     # candidate rows, gathered per (partition, row group) in file order
     tables: list[pa.Table] = []
@@ -353,7 +374,7 @@ def generate_tile(
 
     layer = LayerEncoder(layer_name, extent)
     if not tables:
-        return layer.encode_tile()
+        return layer.encode_tile(), 0
 
     lon0 = np.concatenate(lon0s)
     lat0 = np.concatenate(lat0s)
@@ -432,4 +453,4 @@ def generate_tile(
     seg = packed_segment_dots(np.column_stack((dot_cx[line_dots], dot_cy[line_dots])), half)
     if seg:
         layer.add(seg, GEOM_LINE, None)
-    return layer.encode_tile()
+    return layer.encode_tile(), layer.feature_count
