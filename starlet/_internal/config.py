@@ -37,6 +37,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "feature_capacity": 10_000,
         "tile_attributes": "all",
         "simplify_tolerance": "auto",
+        "row_group_cache": 64,
         "extent": 4096,
         "buffer": 256,
         "pmtiles_compression": "gzip",

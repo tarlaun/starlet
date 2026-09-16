@@ -92,6 +92,9 @@ def invalidate(path: str | os.PathLike | None = None) -> None:
             _datasets.clear()
         else:
             _datasets.pop(str(Path(path).resolve()), None)
+    from starlet._internal.mvt import fast_tile
+
+    fast_tile.invalidate_caches()
 
 
 def generate_tile(

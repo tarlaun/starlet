@@ -20,7 +20,9 @@ Output is byte-compatible with the Rust engine for EPSG:4326 datasets.
 """
 from __future__ import annotations
 
+import threading
 import zlib
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import shapely
 
+from starlet._internal.config import config_value
 from starlet._internal.mvt.helpers import mercator_tile_bounds
 from starlet._internal.mvt.intermediate_tile import (
     PIXEL_GRID,
@@ -183,9 +186,8 @@ def _tile_geometries(frame: TileFrame, geoms: np.ndarray, tolerance: float) -> n
             part_of = part_of[keep]
             rebuilt = np.full(len(idx), None, dtype=object)
             if len(parts):
-                multi = shapely.multipolygons(parts, indices=part_of)
-                # multipolygons() returns one geometry per distinct index in order
-                rebuilt[np.unique(part_of)] = multi
+                uniq, inv = np.unique(part_of, return_inverse=True)
+                rebuilt[uniq] = shapely.multipolygons(parts, indices=inv)
             g[idx] = rebuilt
     # GeometryCollections (mixed clip results): keep the polygon / line parts
     tid = shapely.get_type_id(g)
@@ -207,34 +209,97 @@ def _tile_geometries(frame: TileFrame, geoms: np.ndarray, tolerance: float) -> n
     return g
 
 
-def _partition_arrays(index: ParquetIndex, path: Path, query_lonlat, geom_col: str, has_bbox: bool, columns):
-    """Read one partition's candidates: the table plus lon/lat bbox arrays."""
-    minx, miny, maxx, maxy = query_lonlat
-    if has_bbox:
-        flt = (
-            (pc.field("_bbox_xmax") >= minx)
-            & (pc.field("_bbox_xmin") <= maxx)
-            & (pc.field("_bbox_ymax") >= miny)
-            & (pc.field("_bbox_ymin") <= maxy)
-        )
-        table = pq.read_table(path, columns=columns, filters=flt)
-        if table.num_rows == 0:
-            return None
-        bb = [table[c].to_numpy(zero_copy_only=False).astype(np.float64) for c in BBOX_COLS]
-        return table, bb[0], bb[1], bb[2], bb[3]
-    table = pq.read_table(path, columns=columns)
-    if table.num_rows == 0:
-        return None
-    geoms = shapely.from_wkb(table[geom_col].to_pylist(), on_invalid="ignore")
-    bounds = shapely.bounds(geoms)
-    ok = ~np.isnan(bounds[:, 0])
-    ok &= (bounds[:, 2] >= minx) & (bounds[:, 0] <= maxx) & (bounds[:, 3] >= miny) & (bounds[:, 1] <= maxy)
-    if not ok.any():
-        return None
-    sel = np.flatnonzero(ok)
-    table = table.take(pa.array(sel))
-    bounds = bounds[sel]
-    return table, bounds[:, 0], bounds[:, 1], bounds[:, 2], bounds[:, 3]
+class RowGroupCache:
+    """Decoded row groups of one dataset, shared across tiles (the Python
+    counterpart of the Rust core's LRU): each row group is read once —
+    geometry, bbox and attribute columns — together with its per-row bbox
+    arrays and crc32 priorities. Row groups are pruned by the Parquet
+    statistics of the ``_bbox_*`` columns before being touched at all."""
+
+    def __init__(self, index: ParquetIndex, capacity: int = 64) -> None:
+        self.index = index
+        self.capacity = max(1, int(capacity))
+        self._files: dict[Path, tuple] = {}
+        self._rgs: "OrderedDict[tuple[Path, int], tuple]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def file_info(self, path: Path):
+        info = self._files.get(path)
+        if info is None:
+            pf = pq.ParquetFile(path)
+            names, geom_col, has_bbox, crs = self.index._schema_info(path)
+            attrs = [n for n in names if n != geom_col and n not in INTERNAL_COLS]
+            stats = None
+            if has_bbox:
+                md = pf.metadata
+                cols = [pf.schema_arrow.get_field_index(c) for c in BBOX_COLS]
+                mins = np.full((md.num_row_groups, 2), -np.inf)
+                maxs = np.full((md.num_row_groups, 2), np.inf)
+                for rg in range(md.num_row_groups):
+                    r = md.row_group(rg)
+                    st = [r.column(c).statistics for c in cols]
+                    if all(x is not None and x.has_min_max for x in st):
+                        mins[rg] = (st[0].min, st[1].min)
+                        maxs[rg] = (st[2].max, st[3].max)
+                stats = (mins, maxs)
+            info = (pf, geom_col, has_bbox, crs, attrs, stats)
+            self._files[path] = info
+        return info
+
+    def candidate_row_groups(self, path: Path, q) -> list[int]:
+        pf, _, has_bbox, _, _, stats = self.file_info(path)
+        n = pf.metadata.num_row_groups
+        if not has_bbox or stats is None:
+            return list(range(n))
+        mins, maxs = stats
+        ok = (maxs[:, 0] >= q[0]) & (mins[:, 0] <= q[2]) & (maxs[:, 1] >= q[1]) & (mins[:, 1] <= q[3])
+        return np.flatnonzero(ok).tolist()
+
+    def row_group(self, path: Path, rg: int):
+        """``(table, lon0, lat0, lon1, lat1, crc)`` for one row group."""
+        key = (path, rg)
+        with self._lock:
+            hit = self._rgs.get(key)
+            if hit is not None:
+                self._rgs.move_to_end(key)
+                return hit
+        pf, geom_col, has_bbox, _, attrs, _ = self.file_info(path)
+        columns = [geom_col] + (list(BBOX_COLS) if has_bbox else []) + attrs
+        table = pf.read_row_group(rg, columns=columns)
+        wkb = table[geom_col].to_pylist()
+        if has_bbox:
+            bb = [table[c].to_numpy(zero_copy_only=False).astype(np.float64) for c in BBOX_COLS]
+        else:
+            bounds = shapely.bounds(shapely.from_wkb(wkb, on_invalid="ignore"))
+            bb = [bounds[:, 0], bounds[:, 1], bounds[:, 2], bounds[:, 3]]
+        entry = (table, bb[0], bb[1], bb[2], bb[3], _crc32_array(wkb))
+        with self._lock:
+            self._rgs[key] = entry
+            self._rgs.move_to_end(key)
+            while len(self._rgs) > self.capacity:
+                self._rgs.popitem(last=False)
+        return entry
+
+
+_CACHES: dict[str, RowGroupCache] = {}
+_CACHES_LOCK = threading.Lock()
+
+
+def row_group_cache(parquet_dir: Path, index: ParquetIndex, capacity: int | None = None) -> RowGroupCache:
+    key = str(Path(parquet_dir).resolve())
+    with _CACHES_LOCK:
+        cache = _CACHES.get(key)
+        if cache is None:
+            if capacity is None:
+                capacity = int(config_value("mvt", "row_group_cache"))
+            cache = RowGroupCache(index, capacity)
+            _CACHES[key] = cache
+        return cache
+
+
+def invalidate_caches() -> None:
+    with _CACHES_LOCK:
+        _CACHES.clear()
 
 
 def generate_tile(
@@ -257,33 +322,34 @@ def generate_tile(
     parquet_dir = Path(dataset_path) / "parquet_tiles"
     if index is None:
         index = ParquetIndex(parquet_dir)
+    cache = row_group_cache(parquet_dir, index)
 
+    # candidate rows, gathered per (partition, row group) in file order
     tables: list[pa.Table] = []
     geom_cols: list[str] = []
     attr_cols: list[list[str]] = []
     lon0s, lat0s, lon1s, lat1s, crcs, part_of, row_of = [], [], [], [], [], [], []
-    for pi, path in enumerate(index.find_intersecting_files(frame.query_lonlat)):
-        names, geom_col, has_bbox, _crs = index._schema_info(path)
-        attrs = [n for n in names if n != geom_col and n not in INTERNAL_COLS]
+    qx0, qy0, qx1, qy1 = frame.query_lonlat
+    for path in index.find_intersecting_files(frame.query_lonlat):
+        _pf, geom_col, _has_bbox, _crs, attrs, _stats = cache.file_info(path)
         if attrs_policy is not None:
             attrs = [n for n in attrs if n in attrs_policy]
-        columns = [geom_col] + (list(BBOX_COLS) if has_bbox else []) + attrs
-        res = _partition_arrays(index, path, frame.query_lonlat, geom_col, has_bbox, columns)
-        if res is None:
-            continue
-        table, a, b, c, d = res
-        wkb = table[geom_col].to_pylist()
-        n = table.num_rows
-        tables.append(table)
-        geom_cols.append(geom_col)
-        attr_cols.append(attrs)
-        lon0s.append(a)
-        lat0s.append(b)
-        lon1s.append(c)
-        lat1s.append(d)
-        crcs.append(_crc32_array(wkb))
-        part_of.append(np.full(n, len(tables) - 1, dtype=np.int64))
-        row_of.append(np.arange(n, dtype=np.int64))
+        for rg in cache.candidate_row_groups(path, frame.query_lonlat):
+            table, a, b, c, d, crc = cache.row_group(path, rg)
+            hit = (c >= qx0) & (a <= qx1) & (d >= qy0) & (b <= qy1)
+            if not hit.any():
+                continue
+            rows = np.flatnonzero(hit)
+            tables.append(table)
+            geom_cols.append(geom_col)
+            attr_cols.append(attrs)
+            lon0s.append(a[rows])
+            lat0s.append(b[rows])
+            lon1s.append(c[rows])
+            lat1s.append(d[rows])
+            crcs.append(crc[rows])
+            part_of.append(np.full(len(rows), len(tables) - 1, dtype=np.int64))
+            row_of.append(rows)
 
     layer = LayerEncoder(layer_name, extent)
     if not tables:
