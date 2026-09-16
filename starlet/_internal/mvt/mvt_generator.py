@@ -564,7 +564,12 @@ def _generate_single_mvt_tile_python(
     layer_name: str = "layer0",
     tile_attributes: Any = None,
 ) -> bytes:
-    """Pure-Python single-tile generation (the reference implementation)."""
+    """Pure-Python single-tile generation.
+
+    EPSG:4326 datasets take the vectorised path (:mod:`fast_tile`, numpy +
+    shapely arrays, byte-compatible with the Rust core); other CRSs fall back
+    to the per-feature ``IntermediateVectorTile`` implementation below.
+    """
     feature_capacity = int(
         feature_capacity if feature_capacity is not None else config_value("mvt", "feature_capacity")
     )
@@ -574,6 +579,16 @@ def _generate_single_mvt_tile_python(
     parquet_dir = dataset_dir / "parquet_tiles"
     if not parquet_dir.is_dir():
         raise FileNotFoundError(f"GeoParquet tile directory not found: {parquet_dir}")
+    if _rust_supports_dataset(dataset_path):
+        from starlet._internal.mvt import fast_tile
+
+        return fast_tile.generate_tile(
+            dataset_path, tile_id,
+            feature_capacity=feature_capacity, extent=extent, buffer=buffer,
+            tile_attributes=tile_attributes if tile_attributes is not None else config_value("mvt", "tile_attributes"),
+            simplify_tolerance=config_value("mvt", "simplify_tolerance"),
+            layer_name=layer_name, index=_single_tile_parquet_index(parquet_dir),
+        )
 
     z, x, y = tile_id
     tile_bounds = mercator_tile_bounds(int(z), int(x), int(y))

@@ -203,3 +203,13 @@ def test_tile_attributes_policy_matches_python(tmp_path):
             assert len(feats) == 3
             assert all(set(f["properties"]) == expected_keys for f in feats), policy
         assert _props(rs) == _props(py)
+
+
+@pytest.mark.parametrize("with_bbox", [True, False])
+def test_python_fast_path_is_byte_identical_to_rust(tmp_path, with_bbox):
+    ds = _write_dataset(tmp_path / "ds", with_bbox=with_bbox)
+    rust_engine.invalidate()
+    for tile, cap in (((1, 0, 0), 10), ((0, 0, 0), 1), ((1, 0, 0), 1), ((2, 1, 1), 10)):
+        rs = rust_engine.generate_tile(str(ds), *tile, feature_capacity=cap, extent=4096, buffer=256)
+        py = _generate_single_mvt_tile_python(str(ds), tile, feature_capacity=cap)
+        assert py == rs, (tile, cap, _decoded(py) ^ _decoded(rs))
