@@ -128,6 +128,45 @@ threshold 50k) on the same input, and its earlier version 5 h 43 min at z7.
 | tile set | 548 tiles | identical set |
 | feature sets, 40 random tiles | — | 40/40 identical |
 
+## 2a. The pure-Python engine after vectorisation (no Rust)
+
+The same algorithm is implemented with numpy + shapely array functions and a
+numpy MVT encoder (`starlet/_internal/mvt/fast_tile.py`, `mvt_encoder.py`,
+`python_pyramid.py`), with a statistics-pruned LRU of decoded row groups.
+Measured on ec-hn, `--tile-attributes none`:
+
+**On-the-fly tiles, 9.96M parks** (ms; "before" is the per-feature Python
+path of 0.4.2 with the same selection, "warm" = row groups cached):
+
+| tile | before | Python cold | Python warm | Rust warm |
+|---|---:|---:|---:|---:|
+| z14 | 92 | 368 | **6** | 2.6 |
+| z12 | 96 | 279 | **6** | 2.7 |
+| z10 | 297 | 294 | **16** | 5.4 |
+| z8 (Riverside) | 3,211 | 404 | **87** | 40 |
+| z8 densest | 67,539 | 5,050 | **1,752** | 866 |
+| z6 densest | 72,324 | 11,458 | **3,549** | 2,276 |
+| z4 densest | 137,552 | 39,980 | 39,086 (cache smaller than the tile's row groups) | 7,711 |
+
+**Pyramid, parks25 (2.49M polygons), z0–9, 17.9k tiles, 15 workers:**
+
+| | wall | temp disk | parent RSS |
+|---|---:|---:|---:|
+| Python map/reduce (0.4.2 design) | 673 s | **15 GB** | 1.2 GB |
+| Python pull per tile | 322 s | none | 3.5 GB |
+| Python push pass (z0–6) + pull (z7–9) — the default now | **111 s** | none | 1.3 GB |
+| Rust push-mode | 10.9 s | none | 1.5 GB |
+
+Python and Rust produce the same tile sets (17,903 vs 17,901: four edge tiles
+whose only content is clip slivers) and byte-identical tiles wherever no
+clipping or simplification happens (the synthetic-dataset test asserts this).
+On 73 sampled parks25 tiles: of 16,893 full features, 64% are vertex-for-vertex
+identical, 34% are the same shape within 8 tile units (half a display pixel —
+the two Douglas-Peucker / clipping implementations keep different vertices),
+and 1.9% differ more or exist in one engine only (sliver-dropping decisions);
+of 113,610 dots, 2.3% differ (features at the exact large/sub-pixel or
+cell-boundary thresholds). Tile bytes agree to within 0.7%.
+
 ## 2b. Versus UCR STAR (interactive latency, low-zoom density)
 
 [UCR STAR](https://star.cs.ucr.edu/?OSM2015/parks) serves the same 10M-park
