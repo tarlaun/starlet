@@ -582,10 +582,11 @@ def _rust_supports_dataset(dataset_path: str) -> bool:
         try:
             files = sorted((Path(dataset_path) / "parquet_tiles").glob("*.parquet"))
             if files:
+                from starlet._internal.server.tiler.parquet_index import geometry_column
                 from starlet._internal.tiling.crs import geoparquet_crs
 
                 schema = pq.ParquetFile(files[0]).schema_arrow
-                geom_col = "geometry" if "geometry" in schema.names else schema.names[-1]
+                geom_col = geometry_column(schema)
                 crs = geoparquet_crs(schema, geom_col)
                 if crs is None:
                     ok = True

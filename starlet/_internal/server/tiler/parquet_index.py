@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Iterator, List, Optional, Sequence, Tuple
 
 import geopandas as gpd
+import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import shapely.ops
@@ -42,6 +43,33 @@ BBox = Tuple[float, float, float, float]
 # Per-row bbox covering columns written by the tiling stage (see writer_pool).
 BBOX_COLS = ("_bbox_xmin", "_bbox_ymin", "_bbox_xmax", "_bbox_ymax")
 INTERNAL_COLS = ("_tile_id", *BBOX_COLS)
+
+
+def geometry_column(schema: pa.Schema) -> str:
+    """Geometry column of a partition schema.
+
+    ``geometry`` when present; otherwise the GeoParquet ``primary_column``
+    from the ``geo`` metadata; otherwise the first binary column that is not
+    one of starlet's internal columns; otherwise the last non-internal column.
+    (The bbox covering columns are appended last, so "last column" alone is
+    wrong for datasets whose geometry column has another name.)
+    """
+    names = list(schema.names)
+    if "geometry" in names:
+        return "geometry"
+    raw = (schema.metadata or {}).get(b"geo")
+    if raw:
+        try:
+            primary = json.loads(raw).get("primary_column")
+        except Exception:
+            primary = None
+        if primary in names:
+            return primary
+    for name, typ in zip(names, schema.types):
+        if name not in INTERNAL_COLS and (pa.types.is_binary(typ) or pa.types.is_large_binary(typ)):
+            return name
+    external = [n for n in names if n not in INTERNAL_COLS]
+    return external[-1] if external else (names[-1] if names else "geometry")
 
 
 def _coerce_geometry(geometry):
@@ -145,16 +173,7 @@ class ParquetIndex:
         schema = pq.ParquetFile(path).schema_arrow
         names = list(schema.names)
         has_bbox = all(c in names for c in BBOX_COLS)
-        geom_col = "geometry"
-        if geom_col not in names:
-            geom_col = names[-1] if names else "geometry"
-            meta = schema.metadata or {}
-            raw = meta.get(b"geo")
-            if raw:
-                try:
-                    geom_col = json.loads(raw).get("primary_column", geom_col)
-                except Exception:
-                    pass
+        geom_col = geometry_column(schema)
         crs = geoparquet_crs(schema, geom_col) or WGS84_CRS
         info = (names, geom_col, has_bbox, crs)
         self._schema_cache[key] = info

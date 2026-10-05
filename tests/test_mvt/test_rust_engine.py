@@ -42,12 +42,12 @@ def _features():
     return geoms
 
 
-def _write_dataset(root, *, with_bbox: bool):
+def _write_dataset(root, *, with_bbox: bool, geom_name: str = "geometry"):
     parquet_dir = root / "parquet_tiles"
     parquet_dir.mkdir(parents=True)
     geoms = _features()
     cols = {
-        "geometry": [wkb.dumps(g) for g in geoms],
+        geom_name: [wkb.dumps(g) for g in geoms],
         "id": pa.array([1, 2, 3, 4], pa.int64()),
         "area_m2": pa.array([1.5, 12495083015.0, 0.25, 7.0], pa.float64()),
         "name": ["a", "b", "c", "d"],
@@ -59,7 +59,8 @@ def _write_dataset(root, *, with_bbox: bool):
         cols["_bbox_ymin"] = [x[1] for x in b]
         cols["_bbox_xmax"] = [x[2] for x in b]
         cols["_bbox_ymax"] = [x[3] for x in b]
-    table = pa.table(cols).replace_schema_metadata({b"geo": json.dumps(GEO).encode("utf-8")})
+    geo = dict(GEO, primary_column=geom_name, columns={geom_name: GEO["columns"]["geometry"]})
+    table = pa.table(cols).replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")})
     pq.write_table(table, parquet_dir / "tile_000000__-180_0_-90_0_180_0_90_0.parquet")
     return root
 
@@ -213,3 +214,18 @@ def test_python_fast_path_is_byte_identical_to_rust(tmp_path, with_bbox):
         rs = rust_engine.generate_tile(str(ds), *tile, feature_capacity=cap, extent=4096, buffer=256)
         py = _generate_single_mvt_tile_python(str(ds), tile, feature_capacity=cap)
         assert py == rs, (tile, cap, _decoded(py) ^ _decoded(rs))
+
+
+def test_geometry_column_named_in_geo_metadata(tmp_path):
+    """A geometry column that is not called ``geometry`` (e.g. ``wkb_geometry``)
+    is found through the GeoParquet ``primary_column`` by both engines, even
+    though the bbox covering columns come after it."""
+    from starlet._internal.mvt.mvt_generator import _rust_supports_dataset
+
+    ds = _write_dataset(tmp_path / "ds", with_bbox=True, geom_name="wkb_geometry")
+    rust_engine.invalidate()
+    assert _rust_supports_dataset(str(ds))
+    py = _generate_single_mvt_tile_python(str(ds), (1, 0, 0), feature_capacity=10)
+    rs = rust_engine.generate_tile(str(ds), 1, 0, 0, feature_capacity=10, extent=4096, buffer=256)
+    assert _props(rs) == _props(py)
+    assert {dict(p)["id"] for p in _props(rs)} == {1, 2, 3}

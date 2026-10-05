@@ -207,11 +207,8 @@ impl Dataset {
                 let file = PqFile::open(p)?;
                 let schema = file.schema();
                 let names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
-                let geom_col = if names.iter().any(|n| n == "geometry") {
-                    "geometry".to_string()
-                } else {
-                    names.last().cloned().context("empty schema")?
-                };
+                let geom_col = crate::pq::geometry_column(&schema)
+                    .with_context(|| format!("no geometry column in {}", p.display()))?;
                 let has_bbox_cols = BBOX_COLS.iter().all(|c| names.iter().any(|n| n == c));
                 let attr_cols = names
                     .iter()
