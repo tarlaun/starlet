@@ -167,6 +167,42 @@ and 1.9% differ more or exist in one engine only (sliver-dropping decisions);
 of 113,610 dots, 2.3% differ (features at the exact large/sub-pixel or
 cell-boundary thresholds). Tile bytes agree to within 0.7%.
 
+## 2c. End-to-end scalability series (tile + pyramid, ec-hn)
+
+Same machine, inputs and settings as the v0.3.1 campaign (16-core Xeon
+E5-2609 v4 @ 1.7 GHz, 125 GB; `starlet tile` defaults, then `starlet mvt
+--zoom 7 --threshold 0 --feature-capacity 25000`, all attributes), run on
+`master` @ 15fa94b on 2026-10-05. OSM-Parks extracts: 25/50/75/100% of the
+9.96M-polygon 2015 extract and the full OSM21 parks (42.77M polygons,
+17.6 GB, 1.16 B vertices, geometry column `wkb_geometry`).
+
+| subset | polygons | input | tile s | Rust MVT s | Python MVT s | tiles | MVT MB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 25% | 2.49M | 1.6 GB | 99 | 14 | 75 | 2,356 | 153 |
+| 50% | 4.98M | 2.9 GB | 155 | 12 | 147 | 2,650 | 221 |
+| 75% | 7.47M | 3.9 GB | 218 | 16 | 155 | 3,222 | 257 |
+| 100% | 9.96M | 5.6 GB | 296 | 20 | 208 | 4,269 | 360 |
+| OSM21 | 42.77M | 17.6 GB | 1,231 | 45 | 835 | 5,747 | 791 |
+
+For comparison, v0.3.1 on the same box: tile 268 / 426 / 686 / 823 / 3,736 s
+and MVT 881 / 1,395 / 1,711 / 2,540 / 20,568 s. The tile step is 2.7–3.0×
+faster; the pyramid is 60–460× faster with the Rust engine and 12–25× with
+the pure-Python engine, and neither writes intermediate files. OSM21 end to
+end: 24,304 s → 1,276 s (Rust) or 2,067 s (Python). Peak parent RSS
+(`/usr/bin/time`): tile 2.7 GB, Rust pyramid ≤ 3.0 GB, Python pyramid
+5.4 GB; summing every worker's RSS (which double-counts shared pages) the
+tile step reaches 14–28 GB and the Python pyramid 15–36 GB, so the Python
+engine on OSM21 needs a machine with more than 18 GB. Tile counts differ
+from v0.3.1 (e.g. 2,356 vs 2,451 at 25%) because the pyramid partitioner no
+longer emits near-empty edge tiles, and tiles are about 2.4× smaller because
+the pixel-based selection packs sub-pixel features into dots.
+
+Validating this series surfaced a bug: when no column is called `geometry`
+the Rust opener (and the batch pre-check) took the *last* column, which with
+bbox covering columns is `_bbox_ymax`, and silently wrote an empty pyramid.
+Both engines now resolve the column from the GeoParquet `primary_column`
+(fixed in 15fa94b). Harness: `bench_scratch/scal_master.py` (not shipped).
+
 ## 2b. Versus UCR STAR (interactive latency, low-zoom density)
 
 [UCR STAR](https://star.cs.ucr.edu/?OSM2015/parks) serves the same 10M-park
