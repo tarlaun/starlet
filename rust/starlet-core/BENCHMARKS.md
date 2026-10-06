@@ -183,6 +183,15 @@ E5-2609 v4 @ 1.7 GHz, 125 GB; `starlet tile` defaults, then `starlet mvt
 | 75% | 7.47M | 3.9 GB | 218 | 16 | 155 | 3,222 | 257 |
 | 100% | 9.96M | 5.6 GB | 296 | 20 | 208 | 4,269 | 360 |
 | OSM21 | 42.77M | 17.6 GB | 1,231 | 45 | 835 | 5,747 | 791 |
+| Overture US buildings | 179.37M | 20.1 GB | 4,968 | 73 | 180 | 341 | 97 |
+
+The last row (2026-10-06) is 4.2× more polygons than OSM21 (1.31 B
+vertices, 8 attributes, 8,607 source row groups): tiling writes 215
+partitions / 25 GB in 83 min at a flat 3.2 GB parent RSS (27 GB summed over
+the 16 mappers); the z0–7 pyramid covers the US in 341 tiles, so the
+Rust pass streams the 25 GB once in 73 s (1.2 GB RSS) and the Python push
+pass in 180 s (2.5 GB parent, 20 GB summed over workers). Both engines
+wrote 341 tiles of 96.87 MB.
 
 For comparison, v0.3.1 on the same box: tile 268 / 426 / 686 / 823 / 3,736 s
 and MVT 881 / 1,395 / 1,711 / 2,540 / 20,568 s. The tile step is 2.7–3.0×
