@@ -53,11 +53,12 @@ def test_geojson_source_applies_declared_crs(tmp_path):
                                         "urn:ogc:def:crs:EPSG::3857"))
     source = GeoJSONSource(str(path))
     assert source._crs_hint == "urn:ogc:def:crs:EPSG::3857"
-    table = next(iter(source.iter_tables()))
+    source.set_schema(source.infer_schema())
+    table = next(iter(source.iter_tables(*source.create_splits())))
     assert geoparquet_crs(table.schema, "geometry") == "urn:ogc:def:crs:EPSG::3857"
 
-    sample = read_spatial_sample(str(path), sample_ratio=1.0, sample_cap=None, seed=1, geojson_workers=1)
-    assert sample.mbr.mins[0] == pytest.approx(-13070000.0)
+    sample = read_spatial_sample(str(path), sample_cap=None, seed=1, geojson_workers=1)
+    assert sample.sample_points[0].min() == pytest.approx(-13070000.0)
 
 
 def test_geojson_source_ignores_crs84_and_bad_crs(tmp_path):
@@ -152,6 +153,7 @@ def test_vector_file_formats_are_read(tmp_path, suffix, driver):
     assert set(tables[0]["name"].to_pylist()) == {"a", "b"}
     assert tables[0].schema.field("geometry").type == pa.binary()
 
-    sample = read_spatial_sample(str(path), sample_ratio=1.0, sample_cap=None, seed=1, source_workers=1)
+    sample = read_spatial_sample(str(path), sample_cap=None, seed=1, source_workers=1)
     assert sample.total_seen == 2
-    assert tuple(sample.mbr.maxs) == (6.0, 6.0)
+    # sample points are centroids: the second box spans 5..6
+    assert tuple(sample.sample_points.max(axis=1)) == (5.5, 5.5)

@@ -1,7 +1,8 @@
 # Starlet
 
 **Turn large geospatial datasets into fast, interactive maps.** Starlet
-partitions a GeoParquet / GeoJSON file into spatial tiles, generates
+partitions a geospatial dataset (GeoParquet, GeoJSON, CSV, vector files, GPX
+tracks, or GeoLife PLT trajectories) into spatial tiles, generates
 [Mapbox Vector Tiles](https://github.com/mapbox/vector-tile-spec), and serves
 them over HTTP with a built-in web viewer — all from a single command-line tool.
 
@@ -23,6 +24,12 @@ This installs the `starlet` command-line tool. Check it:
 
 ```bash
 starlet --version
+```
+
+For local development and testing, install the project with dev dependencies:
+
+```bash
+pip install -e ".[dev]"
 ```
 
 ## Quick start
@@ -71,6 +78,7 @@ full option list.
 | `--threshold` | build, mvt | `0` | Minimum estimated density (vertices or covering features) for a tile to be generated |
 | `--feature-capacity` | build, mvt | `10000` | Max features *larger than a pixel* kept per tile (see below) |
 | `--tile-attributes` | build, mvt, serve | `all` | Attribute columns written into tiles: `all`, `none`, or `name,class,…` (see below) |
+| `--mvt-memory-budget` | build, mvt | `auto` | Total memory target for concurrent MVT mappers, e.g. `24gb`, or `none` |
 | `--dir` | serve, mvt, info | required | Dataset directory (or the root of several, for `serve`) |
 | `--port` | serve | `8765` | Port to bind the server |
 
@@ -94,7 +102,22 @@ attributes from the server
 (`GET /datasets/<dataset>/features/at.json?mbr=minx,miny,maxx,maxy`), so they
 are always available, whatever the tiles carry.
 
-### Pre-generate by tile size instead of by zoom
+### Which tiles get pre-generated: by zoom or by size
+
+Starlet pre-generates a pyramid of vector tiles and renders everything else
+on the fly when it is served. Two mutually exclusive modes decide what goes
+into the pyramid; one option switches between them:
+
+| Mode | How to select it | What is pre-generated |
+|------|------------------|-----------------------|
+| **Zoom mode** (default) | `--min-tile-bytes` unset or `0`; `--zoom N` (default 7) | Every non-empty tile from zoom 0 to `N` (subject to `--threshold`) |
+| **Size mode** | `--min-tile-bytes SIZE`, e.g. `50kb` | Every tile, at any zoom, estimated to be at least `SIZE` uncompressed bytes; `--zoom` becomes only an upper bound (default 22) |
+
+In the config file the same switch is `[mvt] min_tile_bytes` (`0` = zoom
+mode) next to `zoom`; in Python it is the `min_tile_bytes` argument of
+`starlet.build()` / `starlet.generate_mvt()`. Switching modes changes only
+which tiles are written ahead of time: tile content is identical in both
+modes and identical to what the server renders on the fly.
 
 A fixed `--zoom` either stops too early for dense areas or wastes time on
 thousands of tiny tiles elsewhere. `--min-tile-bytes` turns the pyramid into a
@@ -111,8 +134,14 @@ render and is left to the on-the-fly server. `--zoom` still caps the depth
 errs towards pre-generating some small tiles rather than missing large ones.
 
 ```bash
-# Pre-generate every tile that would be ~50 KB or more, at any zoom
+# Zoom mode: every tile up to zoom 8
+starlet build --input states.parquet --outdir datasets/states --zoom 8
+
+# Size mode: every tile that would be ~50 KB or more, at any zoom up to 22
 starlet build --input states.parquet --outdir datasets/states --min-tile-bytes 50kb
+
+# Size mode, but never deeper than zoom 14
+starlet build --input states.parquet --outdir datasets/states --min-tile-bytes 50kb --zoom 14
 ```
 
 ### Examples

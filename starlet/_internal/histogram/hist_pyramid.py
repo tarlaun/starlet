@@ -14,6 +14,7 @@ from shapely import from_wkb, get_coordinates
 from pyproj import Transformer
 
 from starlet._internal.executor import create_process_executor
+from starlet._internal.histogram.io import save_numpy_array
 from starlet._internal.tiling.crs import WGS84_CRS, geoparquet_crs
 from starlet._internal.tiling.datasource import GeoParquetSource
 
@@ -252,7 +253,7 @@ def _process_split_group(
 # GLOBAL SUM AND PREFIX SUM
 # ---------------------------------------------------------------------------
 
-COVERAGE_FILENAME = "global_cover.npy"
+COVERAGE_FILENAME = "global_cover.npy.gz"
 
 
 def _sum_all_tiles(
@@ -284,12 +285,11 @@ def _sum_all_tiles(
         # half the size of the float64 vertex histogram. The prefix sum is
         # rebuilt on load (HistogramLoader).
         coverage = np.clip(coverage, 0, np.iinfo(np.uint32).max).astype(np.uint32)
-        cover_path = outdir / COVERAGE_FILENAME
-        np.save(cover_path, coverage, allow_pickle=False)
+        cover_path = save_numpy_array(outdir / COVERAGE_FILENAME, coverage)
         with open(outdir / "global_cover.json", "w") as f:
             json.dump(
                 {
-                    "filename": COVERAGE_FILENAME,
+                    "filename": cover_path.name,
                     "dtype": str(coverage.dtype),
                     "grid_size": int(coverage.shape[0]),
                     "shape": list(coverage.shape),
@@ -303,11 +303,10 @@ def _sum_all_tiles(
             )
         logger.info("Wrote bbox coverage histogram: %s", cover_path)
 
-    global_path = outdir / "global.npy"
-    np.save(global_path, total, allow_pickle=False)
+    global_path = save_numpy_array(outdir / "global.npy.gz", total)
 
     global_json = {
-        "filename": "global.npy",
+        "filename": global_path.name,
         "dtype": str(total.dtype),
         "grid_size": int(total.shape[0]),
         "shape": list(total.shape),
@@ -319,27 +318,9 @@ def _sum_all_tiles(
     with open(outdir / "global.json", "w") as f:
         json.dump(global_json, f, indent=2)
 
-    prefix = total.cumsum(axis=0).cumsum(axis=1)
-
-    prefix_path = outdir / "global_prefix.npy"
-    np.save(prefix_path, prefix, allow_pickle=False)
-
-    prefix_json = {
-        "filename": "global_prefix.npy",
-        "dtype": str(prefix.dtype),
-        "grid_size": int(prefix.shape[0]),
-        "shape": list(prefix.shape),
-        "crs": "EPSG:3857",
-        "bbox": list(GLOBAL_BBOX),
-        "desc": "2D prefix sum histogram"
-    }
-    with open(outdir / "global_prefix.json", "w") as f:
-        json.dump(prefix_json, f, indent=2)
-
     logger.info(f"Wrote global histogram: {global_path}")
-    logger.info(f"Wrote global prefix sum histogram: {prefix_path}")
 
-    return prefix_path
+    return global_path
 
 
 # ---------------------------------------------------------------------------

@@ -121,11 +121,12 @@ def test_spatial_sample_from_native_geoparquet(tmp_path):
     path = tmp_path / "native_sample.parquet"
     _write_native(path, [box(0, 0, 1, 1), box(10, 10, 11, 11)])
 
-    sample = read_spatial_sample(str(path), sample_ratio=1.0, sample_cap=None, seed=1, geoparquet_workers=1)
+    sample = read_spatial_sample(str(path), sample_cap=None, seed=1, geoparquet_workers=1)
 
     assert sample.total_seen == 2
-    assert tuple(sample.mbr.mins) == (0.0, 0.0)
-    assert tuple(sample.mbr.maxs) == (11.0, 11.0)
+    # sample points are centroids of the two unit boxes
+    assert tuple(sample.sample_points.min(axis=1)) == (0.5, 0.5)
+    assert tuple(sample.sample_points.max(axis=1)) == (10.5, 10.5)
 
 
 def test_wkb_schema_replaces_field_and_metadata():

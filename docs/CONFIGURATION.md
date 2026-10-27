@@ -68,9 +68,11 @@ compression = "zstd"
 [mvt]
 zoom = 8
 threshold = 50000
-# Size-threshold mode: 0 (default) builds the fixed pyramid up to `zoom`;
-# e.g. "50kb" pre-generates only tiles estimated to be at least that large,
-# at any zoom up to `size_mode_max_zoom` (22) or an explicit `zoom`.
+# Pyramid mode switch. `min_tile_bytes = 0` (default) is *zoom mode*: the
+# fixed pyramid up to `zoom`. A size such as "50kb" is *size mode*: only tiles
+# estimated to be at least that large are pre-generated, at any zoom up to
+# `size_mode_max_zoom` (22) or an explicit `zoom`; smaller tiles are rendered
+# on the fly by the server.
 # `size_mode_safety` (2.5) scales the size estimates: raise it to miss fewer
 # large tiles at the cost of pre-generating more small ones, lower it for the
 # opposite.
@@ -98,7 +100,8 @@ the specific job you are running:
 
 - input paths such as `--input`
 - dataset/output paths such as `--outdir` and `--dir`
-- source schema details such as `--csv-x-col`, `--csv-y-col`, and `--csv-wkt-col`
+- source schema details such as `--csv-x-col`, `--csv-y-col`, `--csv-wkt-col`,
+  `--csv-x-index`, `--csv-y-index`, and `--csv-wkt-index`
 - run-specific controls such as `--covering-bbox` and `--seed`
 
 ## Current Command Surface

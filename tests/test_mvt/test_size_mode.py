@@ -13,7 +13,7 @@ def _dataset(tmp_path, hist, cover=None, attributes=None):
     (root / "parquet_tiles" / "tile_000000.parquet").write_bytes(b"x")
     (root / "histograms").mkdir()
     hist = np.asarray(hist, dtype=np.float64)
-    np.save(root / "histograms" / "global_prefix.npy", hist.cumsum(axis=0).cumsum(axis=1))
+    np.save(root / "histograms" / "global.npy", hist)
     if cover is None:
         cover = (hist > 0).astype(np.uint32)
     np.save(root / "histograms" / "global_cover.npy", np.asarray(cover, dtype=np.uint32))

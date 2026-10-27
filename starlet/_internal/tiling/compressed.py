@@ -22,9 +22,21 @@ _OPENERS: dict[str, Callable] = {
 }
 
 
+# ``.bz2`` files the readers stream directly (block-parallel), so they are not
+# decompressed up front.
+_NATIVE_BZ2_INNER_SUFFIXES = (".geojson", ".geojsonl", ".json", ".jsonl", ".csv", ".tsv", ".txt")
+
+
 def compressed_suffix(path: str | Path) -> str | None:
-    suffix = Path(path).suffix.lower()
-    return suffix if suffix in _OPENERS else None
+    """The compression suffix of ``path`` when starlet has to decompress it
+    before reading, else ``None``."""
+    name = Path(path).name.lower()
+    suffix = Path(name).suffix
+    if suffix not in _OPENERS:
+        return None
+    if suffix == ".bz2" and name[: -len(suffix)].endswith(_NATIVE_BZ2_INNER_SUFFIXES):
+        return None
+    return suffix
 
 
 def is_compressed_path(path: str | Path) -> bool:
