@@ -70,19 +70,60 @@ class Dataset:
 
     @property
     def bbox(self) -> Optional[Tuple[float, float, float, float]]:
+        """Dataset extent ``(west, south, east, north)`` in EPSG:4326.
+
+        The stored statistics keep the extent in the dataset's own CRS; it is
+        reprojected here so callers (PMTiles headers, viewers) always get
+        lon/lat regardless of the input projection or geometry column name.
+        """
+        raw = self.source_bbox
+        if raw is None:
+            return None
+        crs = self.parquet_crs
+        if crs is None:
+            return raw
+        try:
+            from pyproj import CRS, Transformer
+
+            source = CRS.from_user_input(crs)
+            if source.equals(CRS.from_epsg(4326), ignore_axis_order=True):
+                return raw
+            transformer = Transformer.from_crs(source, "EPSG:4326", always_xy=True)
+            west, south, east, north = transformer.transform_bounds(*raw, densify_pts=21)
+            return (float(west), float(south), float(east), float(north))
+        except Exception:
+            return raw
+
+    @property
+    def source_bbox(self) -> Optional[Tuple[float, float, float, float]]:
+        """Extent ``(minx, miny, maxx, maxy)`` in the dataset's own CRS, read
+        from ``stats/attributes.json`` (whatever the geometry column is called)."""
         stats_path = self._root / "stats" / "attributes.json"
-        if stats_path.exists():
-            try:
-                with open(stats_path) as f:
-                    stats = json.load(f)
-                for attr in stats.get("attributes", []):
-                    if attr["name"] == "geometry":
-                        mbr = attr["stats"].get("mbr")
-                        if mbr and len(mbr) == 4:
-                            return tuple(mbr)
-            except Exception:
-                pass
-        return None
+        if not stats_path.exists():
+            return None
+        try:
+            with open(stats_path) as f:
+                stats = json.load(f)
+            attributes = stats.get("attributes", [])
+            # The stats writer emits a list of {"name", "stats"}; older /
+            # hand-written files may use {name: stats}. Accept both.
+            if isinstance(attributes, dict):
+                entries = [(name, value) for name, value in attributes.items()]
+            else:
+                entries = [(attr.get("name"), attr.get("stats") or attr) for attr in attributes]
+            candidates = []
+            for name, value in entries:
+                if not isinstance(value, dict):
+                    continue
+                mbr = value.get("mbr") or (value.get("stats") or {}).get("mbr")
+                if mbr and len(mbr) == 4:
+                    candidates.append((name != "geometry", tuple(float(v) for v in mbr)))
+        except Exception:
+            return None
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
 
     @property
     def zoom_levels(self) -> List[int]:
@@ -226,12 +267,12 @@ class Dataset:
             names = list(schema.names)
             has_bbox = has_bbox and all(column in names for column in BBOX_COLS)
             if crs is None:
-                geom_col = "geometry"
-                if geom_col not in names and names:
-                    geom_col = names[-1]
-                raw_crs = geoparquet_crs(schema, geom_col)
+                from starlet._internal.server.tiler.parquet_index import geometry_column
+
+                raw_crs = geoparquet_crs(schema, geometry_column(schema))
                 if raw_crs is not None:
-                    crs = str(raw_crs)
+                    # PROJJSON objects are kept as JSON text so pyproj can parse them.
+                    crs = json.dumps(raw_crs) if isinstance(raw_crs, dict) else str(raw_crs)
 
         self._parquet_info = (has_bbox, crs)
         return self._parquet_info

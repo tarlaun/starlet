@@ -17,6 +17,10 @@ def export_to_pmtiles(
     output_path: str,
     tile_type: str = "mvt",
     compression: str = "gzip",
+    *,
+    metadata: Optional[dict] = None,
+    bounds: Optional[tuple[float, float, float, float]] = None,
+    center: Optional[tuple[float, float, int]] = None,
 ) -> str:
     """Export MVT tiles directory to a single PMTiles archive.
 
@@ -32,6 +36,14 @@ def export_to_pmtiles(
     compression : str
         Compression format: "gzip", "none", "brotli", "zstd".
         Default "gzip".
+    metadata : dict, optional
+        TileJSON-style metadata JSON stored in the archive (``name``,
+        ``vector_layers``, ``bounds`` ...). Defaults to an empty object.
+    bounds : (west, south, east, north), optional
+        Lon/lat extent written to the header; viewers use it to fit the map.
+        Defaults to the whole world.
+    center : (lon, lat, zoom), optional
+        Initial view written to the header.
 
     Returns
     -------
@@ -125,7 +137,18 @@ def export_to_pmtiles(
             "tile_type": tt,
             "tile_compression": comp,
         }
-        writer.finalize(header, {})
+        if bounds is not None:
+            west, south, east, north = bounds
+            header["min_lon_e7"] = int(round(west * 1e7))
+            header["min_lat_e7"] = int(round(south * 1e7))
+            header["max_lon_e7"] = int(round(east * 1e7))
+            header["max_lat_e7"] = int(round(north * 1e7))
+        if center is not None:
+            lon, lat, zoom = center
+            header["center_lon_e7"] = int(round(lon * 1e7))
+            header["center_lat_e7"] = int(round(lat * 1e7))
+            header["center_zoom"] = int(zoom)
+        writer.finalize(header, dict(metadata or {}))
 
     file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
     logger.info(f"PMTiles export complete: {output_path} ({file_size_mb:.2f} MB)")
