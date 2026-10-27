@@ -23,7 +23,7 @@ from pyproj import Transformer
 import shapely
 from shapely import from_wkb
 
-from starlet._internal.histogram.loader import HistogramLoader
+from starlet._internal.histogram.loader import HistogramLoader, coverage_prefix_path, load_coverage_prefix
 from starlet._internal.config import config_value, resolve_temp_dir
 from starlet._internal.mvt.helpers import (
     WORLD_MAXX,
@@ -41,6 +41,7 @@ from starlet._internal.mvt.intermediate_tile import (
 from starlet._internal.mvt.pyramid_partitioner import PyramidPartitioner
 from starlet._internal.pmtiles.paths import default_pmtiles_path
 from starlet._internal.pmtiles.exporter import export_to_pmtiles
+from starlet._internal.pmtiles.metadata import pmtiles_export_options
 from starlet._internal.server.tiler.parquet_index import INTERNAL_COLS, ParquetIndex
 from starlet._internal.tiling.crs import WEB_MERCATOR_CRS, WGS84_CRS, geoparquet_crs, reproject_geometries
 from starlet._internal.tiling.geoparquet_source import GeoParquetSource, GeoParquetSplit
@@ -113,6 +114,7 @@ class DatasetMVTGenerator:
         seed: int = 42,
         temp_dir: str | None = None,
         tile_attributes: Any = None,
+        min_tile_bytes: int | None = None,
     ) -> None:
         self.dataset_dir = Path(dataset_dir)
         self.tile_attributes = normalize_tile_attributes(
@@ -138,11 +140,20 @@ class DatasetMVTGenerator:
         self.geom_col = geom_col
         self.seed = int(seed)
         self.temp_dir = temp_dir
+        # Size mode: generate every tile whose encoded size is estimated to be
+        # at least this many (uncompressed) bytes, zoom by zoom, instead of a
+        # fixed pyramid depth; ``num_zoom_levels`` is then only an upper bound.
+        self.min_tile_bytes = int(
+            min_tile_bytes if min_tile_bytes is not None else (config_value("mvt", "min_tile_bytes", 0) or 0)
+        )
+        self.size_mode_stats: dict[int, dict[str, int]] = {}
 
         if self.num_zoom_levels <= 0:
             raise ValueError("num_zoom_levels must be positive")
         if self.threshold < 0:
             raise ValueError("threshold must be non-negative")
+        if self.min_tile_bytes < 0:
+            raise ValueError("min_tile_bytes must be non-negative")
         if self.output_format not in {"mvt", "pmtiles"}:
             raise ValueError("output_format must be 'mvt' or 'pmtiles'")
         if self.extent <= 0:
@@ -151,15 +162,27 @@ class DatasetMVTGenerator:
     def run(self) -> DatasetMVTGenerationResult:
         if not self.parquet_dir.is_dir():
             raise FileNotFoundError(f"GeoParquet tile directory not found: {self.parquet_dir}")
+        if not any(self.parquet_dir.glob("*.parquet")):
+            # An empty input (e.g. a GeoJSON FeatureCollection with no features)
+            # produces a dataset without partitions or histograms: nothing to tile.
+            logger.warning("DatasetMVTGenerator: %s has no parquet partitions; no tiles generated", self.parquet_dir)
+            return DatasetMVTGenerationResult(str(self.outdir), 0, [], [], None)
         if not self.hist_path.exists():
             raise FileNotFoundError(f"Prefix histogram not found: {self.hist_path}")
 
         from starlet._internal.mvt import rust_engine
 
-        if rust_engine.batch_enabled() and _rust_supports_dataset(str(self.dataset_dir)):
+        pyramid_engine_ok = _rust_supports_dataset(str(self.dataset_dir))
+        if rust_engine.batch_enabled() and pyramid_engine_ok:
             return self._run_rust_pyramid()
-        if str(config_value("mvt", "python_pyramid")).lower() != "mapreduce" and _rust_supports_dataset(str(self.dataset_dir)):
+        if str(config_value("mvt", "python_pyramid")).lower() != "mapreduce" and pyramid_engine_ok:
             return self._run_python_pyramid()
+        if self.min_tile_bytes > 0:
+            raise ValueError(
+                "min_tile_bytes (size-threshold pyramid) requires the zoom-by-zoom pyramid "
+                "engines, which need an EPSG:4326 dataset and mvt.python_pyramid != 'mapreduce'. "
+                "Reproject the input to EPSG:4326 or use a fixed --zoom instead."
+            )
 
         source = GeoParquetSource(str(self.parquet_dir), geom_col=self.geom_col)
         map_groups = _create_map_groups(source, self.workers)
@@ -170,41 +193,36 @@ class DatasetMVTGenerator:
         with tempfile.TemporaryDirectory(prefix="starlet_mvt_", dir=temp_parent) as temp_dir:
             map_results = self._run_map_stage(map_groups, source, Path(temp_dir))
             self._run_reduce_stage(map_results)
+        return self._finish()
 
-        tile_counts_by_zoom = _discover_tile_counts_by_zoom(self.outdir)
-        zoom_levels = [z for z, count in enumerate(tile_counts_by_zoom) if count > 0]
-        tile_count = sum(tile_counts_by_zoom)
-
-        pmtiles_path = None
-        if self.output_format == "pmtiles":
-            pmtiles_path = str(self.pmtiles_path)
-            export_to_pmtiles(
-                mvt_dir=str(self.outdir),
-                output_path=pmtiles_path,
-                tile_type="mvt",
-                compression=self.pmtiles_compression,
-            )
-            if self.outdir.exists():
-                shutil.rmtree(self.outdir)
-        return DatasetMVTGenerationResult(
-            outdir=str(self.outdir),
-            tile_count=tile_count,
-            zoom_levels=zoom_levels,
-            tile_counts_by_zoom=tile_counts_by_zoom,
-            pmtiles_path=pmtiles_path,
-        )
-
-    def _enumerate_tiles(self) -> dict[int, list[tuple[int, int, int]]]:
-        """Tiles passing the histogram / threshold filter, per zoom, in
-        quadtree (spatially local) order."""
+    def _build_partitioner(self) -> PyramidPartitioner:
+        """Pyramid partitioner over the dataset's vertex histogram and, when
+        present, its bbox coverage histogram (tiles fully inside polygons have
+        no vertices and were skipped without it)."""
         prefix = HistogramLoader(str(self.hist_path)).load()
-        partitioner = PyramidPartitioner(
+        coverage = load_coverage_prefix(self.hist_path)
+        if coverage is None:
+            logger.warning(
+                "No bbox coverage histogram (%s) for %s: tiles fully inside polygons may be "
+                "skipped. Re-run `starlet tile` to rebuild the histograms.",
+                coverage_prefix_path(self.hist_path).name,
+                self.dataset_dir,
+            )
+        return PyramidPartitioner(
             (WORLD_MINX, WORLD_MINY, WORLD_MAXX, WORLD_MAXY),
             self.num_zoom_levels,
             prefix_histogram=prefix,
             size_threshold=self.threshold,
             buffer=self.partition_buffer,
+            coverage_prefix=coverage,
         )
+
+    def _enumerate_tiles(self, partitioner: PyramidPartitioner | None = None) -> dict[int, list[tuple[int, int, int]]]:
+        """Tiles passing the histogram / threshold filter, per zoom, in
+        quadtree (spatially local) order. Histogram mass is monotone, so a
+        tile that fails the filter has no descendant that passes it."""
+        if partitioner is None:
+            partitioner = self._build_partitioner()
         tiles_by_zoom: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
         stack: list[tuple[int, int, int]] = [(0, 0, 0)]
         while stack:
@@ -217,6 +235,103 @@ class DatasetMVTGenerator:
                               (z + 1, 2 * x, 2 * y + 1), (z + 1, 2 * x + 1, 2 * y + 1)))
         return tiles_by_zoom
 
+    # ------------------------------------------------------------------
+    # Size-threshold mode (min_tile_bytes)
+    # ------------------------------------------------------------------
+    def _written_tile_sizes(self, z: int) -> dict[tuple[int, int], int]:
+        """``{(x, y): bytes}`` of the tiles written for zoom ``z``."""
+        zoom_dir = self.outdir / str(z)
+        sizes: dict[tuple[int, int], int] = {}
+        if not zoom_dir.is_dir():
+            return sizes
+        for x_dir in zoom_dir.iterdir():
+            if not x_dir.is_dir() or not x_dir.name.isdigit():
+                continue
+            x = int(x_dir.name)
+            for tile_file in x_dir.glob("*.mvt"):
+                stem = tile_file.stem
+                if stem.isdigit():
+                    sizes[(x, int(stem))] = tile_file.stat().st_size
+        return sizes
+
+    # Bytes-per-vertex grows from one zoom to the next (less simplification);
+    # the growth factor used before two zooms have been observed, and its
+    # clamp range, were calibrated on the states/provinces pyramid.
+    _SIZE_MODE_PRIOR_GROWTH = 3.0
+    _SIZE_MODE_GROWTH_RANGE = (1.0, 4.0)
+    _SIZE_MODE_RATIO_PERCENTILE = 90
+
+    def _run_size_mode(self, write_zoom, partitioner: PyramidPartitioner | None = None) -> None:
+        """Generate the pyramid zoom by zoom, keeping only tiles whose encoded
+        size is estimated to reach ``min_tile_bytes``.
+
+        Zoom 0 is always written. For zoom ``z`` the candidates are the
+        children (passing the histogram filter) of the tiles written at
+        ``z-1``. A child's size is estimated as ``vertices(child) * r_z`` where
+        ``vertices`` comes from the vertex histogram and ``r_z`` is the
+        bytes-per-vertex expected at zoom ``z``: the 90th percentile of the
+        actual bytes/vertex of the tiles written at ``z-1``, scaled by the
+        growth observed between the two previous zooms (tile simplification
+        weakens with depth, so bytes per raw vertex rise). The high percentile
+        deliberately over-estimates: pre-generating a few small tiles is
+        cheap, missing a large one is not. Tiles without any vertex (fully
+        inside a polygon) encode to a tiny fill and are never kept. Children
+        below the threshold are neither written nor descended into; they are
+        left to on-the-fly generation. The walk stops at the first zoom with
+        no kept tile or at the configured maximum zoom.
+
+        ``write_zoom(z, tiles)`` must write the given tiles (non-empty ones)
+        to ``<outdir>/z/x/y.mvt``.
+        """
+        if partitioner is None:
+            partitioner = self._build_partitioner()
+        min_bytes = float(self.min_tile_bytes)
+        root = (0, 0, 0)
+        root_ok = partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(*root), *root)
+        self.size_mode_stats = {}
+        write_zoom(0, [root] if root_ok else [])
+        self.size_mode_stats[0] = {"candidates": 1, "kept": 1 if root_ok else 0}
+
+        ratio_history: list[float] = []
+        for z in range(1, partitioner.max_zoom + 1):
+            parents = self._written_tile_sizes(z - 1)
+            ratios = []
+            for (px, py), size in parents.items():
+                hist = partitioner.histogram_value(z - 1, px, py)
+                if hist > 0:
+                    ratios.append(size / hist)
+            if not ratios:
+                logger.info("DatasetMVTGenerator[size-mode] z=%d: no tiles with vertices at z=%d, stopping", z, z - 1)
+                break
+            ratio = float(np.percentile(ratios, self._SIZE_MODE_RATIO_PERCENTILE))
+            if ratio_history:
+                growth = ratio / max(ratio_history[-1], 1e-12)
+                low, high = self._SIZE_MODE_GROWTH_RANGE
+                growth = min(max(growth, low), high)
+            else:
+                growth = self._SIZE_MODE_PRIOR_GROWTH
+            ratio_history.append(ratio)
+            bytes_per_vertex = ratio * growth
+
+            kept: list[tuple[int, int, int]] = []
+            candidates = 0
+            for (px, py), _parent_bytes in parents.items():
+                for cx, cy in ((2 * px, 2 * py), (2 * px + 1, 2 * py), (2 * px, 2 * py + 1), (2 * px + 1, 2 * py + 1)):
+                    if not partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(z, cx, cy), z, cx, cy):
+                        continue
+                    candidates += 1
+                    estimate = partitioner.histogram_value(z, cx, cy) * bytes_per_vertex
+                    if estimate >= min_bytes:
+                        kept.append((z, cx, cy))
+            self.size_mode_stats[z] = {"candidates": candidates, "kept": len(kept)}
+            logger.info(
+                "DatasetMVTGenerator[size-mode] z=%d candidates=%d kept=%d (min_tile_bytes=%d, est. bytes/vertex=%.3f)",
+                z, candidates, len(kept), self.min_tile_bytes, bytes_per_vertex,
+            )
+            if not kept:
+                break
+            write_zoom(z, kept)
+
     def _finish(self) -> DatasetMVTGenerationResult:
         tile_counts_by_zoom = _discover_tile_counts_by_zoom(self.outdir)
         zoom_levels = [z for z, count in enumerate(tile_counts_by_zoom) if count > 0]
@@ -224,10 +339,15 @@ class DatasetMVTGenerator:
         pmtiles_path = None
         if self.output_format == "pmtiles":
             pmtiles_path = str(self.pmtiles_path)
-            export_to_pmtiles(
-                mvt_dir=str(self.outdir), output_path=pmtiles_path,
-                tile_type="mvt", compression=self.pmtiles_compression,
-            )
+            if tile_count == 0:
+                logger.warning("DatasetMVTGenerator: no tiles generated; PMTiles archive not written")
+                pmtiles_path = None
+            else:
+                export_to_pmtiles(
+                    mvt_dir=str(self.outdir), output_path=pmtiles_path,
+                    tile_type="mvt", compression=self.pmtiles_compression,
+                    **self._pmtiles_options(tile_counts_by_zoom),
+                )
             if self.outdir.exists():
                 shutil.rmtree(self.outdir)
         return DatasetMVTGenerationResult(
@@ -235,13 +355,26 @@ class DatasetMVTGenerator:
             tile_counts_by_zoom=tile_counts_by_zoom, pmtiles_path=pmtiles_path,
         )
 
+    def _pmtiles_options(self, tile_counts_by_zoom: list[int]) -> dict[str, Any]:
+        try:
+            return pmtiles_export_options(
+                self.dataset_dir, tile_counts_by_zoom,
+                tile_attributes=self.tile_attributes if self.tile_attributes is not None else "all",
+                geom_col=self.geom_col,
+            )
+        except Exception:
+            logger.warning("Could not derive PMTiles metadata for %s", self.dataset_dir, exc_info=True)
+            return {}
+
     def _run_python_pyramid(self) -> DatasetMVTGenerationResult:
         """Pure-Python pyramid without intermediate files: every tile is
         generated by the vectorised single-tile path (:mod:`fast_tile`) in a
         process pool, tiles handed out in quadtree order so each worker's
         row-group cache stays hot. Memory is bounded by the per-worker cache
         (``mvt.batch_row_group_cache`` row groups); no temp disk is used."""
-        tiles_by_zoom = self._enumerate_tiles()
+        from starlet._internal.mvt.python_pyramid import run_push
+
+        partitioner = self._build_partitioner()
         self.outdir.mkdir(parents=True, exist_ok=True)
         params = dict(
             feature_capacity=self.feature_capacity, extent=self.extent, buffer=self.buffer,
@@ -253,24 +386,38 @@ class DatasetMVTGenerator:
         # the push-mode pass, which streams every row group once for all of
         # them; the rest are pulled tile by tile.
         push_max = int(config_value("mvt", "push_max_tiles"))
-        push_zooms = [z for z in sorted(tiles_by_zoom) if len(tiles_by_zoom[z]) <= push_max]
         with ProcessPoolExecutor(max_workers=self.workers) as executor:
-            if push_zooms:
-                from starlet._internal.mvt.python_pyramid import run_push
-
-                push_tiles = [t for z in push_zooms for t in tiles_by_zoom[z]]
-                written = run_push(str(self.dataset_dir), str(self.outdir), push_tiles, params, executor, self.workers)
-                logger.info("DatasetMVTGenerator[python] push zooms=%s candidates=%d written=%d", push_zooms, len(push_tiles), written)
-            for z in sorted(tiles_by_zoom):
-                if z in push_zooms:
-                    continue
-                tiles = tiles_by_zoom[z]
+            def write_pull(label: str, tiles: list[tuple[int, int, int]]) -> None:
                 futures = [
                     executor.submit(_python_pyramid_chunk, str(self.dataset_dir), str(self.outdir), tiles[i:i + chunk], params)
                     for i in range(0, len(tiles), chunk)
                 ]
                 written = sum(f.result() for f in futures)
-                logger.info("DatasetMVTGenerator[python] z=%d candidates=%d written=%d", z, len(tiles), written)
+                logger.info("DatasetMVTGenerator[python] %s candidates=%d written=%d", label, len(tiles), written)
+
+            def write_push(label: str, tiles: list[tuple[int, int, int]]) -> None:
+                written = run_push(str(self.dataset_dir), str(self.outdir), tiles, params, executor, self.workers)
+                logger.info("DatasetMVTGenerator[python] push %s candidates=%d written=%d", label, len(tiles), written)
+
+            if self.min_tile_bytes > 0:
+                def write_zoom(z: int, tiles: list[tuple[int, int, int]]) -> None:
+                    if not tiles:
+                        return
+                    if len(tiles) <= push_max:
+                        write_push(f"z={z}", tiles)
+                    else:
+                        write_pull(f"z={z}", tiles)
+
+                self._run_size_mode(write_zoom, partitioner)
+                return self._finish()
+
+            tiles_by_zoom = self._enumerate_tiles(partitioner)
+            push_zooms = [z for z in sorted(tiles_by_zoom) if len(tiles_by_zoom[z]) <= push_max]
+            if push_zooms:
+                write_push(f"zooms={push_zooms}", [t for z in push_zooms for t in tiles_by_zoom[z]])
+            for z in sorted(tiles_by_zoom):
+                if z not in push_zooms:
+                    write_pull(f"z={z}", tiles_by_zoom[z])
         return self._finish()
 
     def _run_rust_pyramid(self) -> DatasetMVTGenerationResult:
@@ -285,33 +432,35 @@ class DatasetMVTGenerator:
         """
         from starlet._internal.mvt import rust_engine
 
-        prefix = HistogramLoader(str(self.hist_path)).load()
-        partitioner = PyramidPartitioner(
-            (WORLD_MINX, WORLD_MINY, WORLD_MAXX, WORLD_MAXY),
-            self.num_zoom_levels,
-            prefix_histogram=prefix,
-            size_threshold=self.threshold,
-            buffer=self.partition_buffer,
-        )
-        # Quadtree walk: histogram mass is monotone, so a tile that fails the
-        # filter has no descendant that passes it.
-        tiles_by_zoom: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
-        stack: list[tuple[int, int, int]] = [(0, 0, 0)]
-        while stack:
-            z, x, y = stack.pop()
-            if not partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(z, x, y), z, x, y):
-                continue
-            tiles_by_zoom[z].append((z, x, y))
-            if z < partitioner.max_zoom:
-                stack.extend(((z + 1, 2 * x, 2 * y), (z + 1, 2 * x + 1, 2 * y),
-                              (z + 1, 2 * x, 2 * y + 1), (z + 1, 2 * x + 1, 2 * y + 1)))
-
+        partitioner = self._build_partitioner()
         ds = rust_engine.dataset(self.dataset_dir)
         self.outdir.mkdir(parents=True, exist_ok=True)
-        # Push-mode pyramid: two streaming passes over the row groups per
-        # call, memory bounded by per-tile winner *references* plus the tiles
-        # still being filled. Zooms are batched so one call never tracks more
-        # than _RUST_PYRAMID_MAX_TILES tiles at once.
+
+        def write_tiles(label: str, tiles: list[tuple[int, int, int]]) -> None:
+            # Push-mode pyramid: two streaming passes over the row groups per
+            # call, memory bounded by per-tile winner *references* plus the
+            # tiles still being filled; never more than _RUST_PYRAMID_MAX_TILES
+            # tiles per call.
+            for start in range(0, len(tiles), _RUST_PYRAMID_MAX_TILES):
+                part = tiles[start:start + _RUST_PYRAMID_MAX_TILES]
+                st = ds.write_pyramid(
+                    str(self.outdir), part,
+                    feature_capacity=self.feature_capacity, extent=self.extent, buffer=self.buffer,
+                    tile_attributes=self.tile_attributes,
+                    simplify_tolerance=_tolerance_arg(self.simplify_tolerance, self.extent),
+                )
+                logger.info(
+                    "DatasetMVTGenerator[rust] %s requested=%d written=%d candidates=%d features=%d",
+                    label, st["tiles_requested"], st["tiles_written"], st["candidates"], st["features"],
+                )
+
+        if self.min_tile_bytes > 0:
+            self._run_size_mode(lambda z, tiles: write_tiles(f"z={z}", tiles) if tiles else None, partitioner)
+            return self._finish()
+
+        tiles_by_zoom = self._enumerate_tiles(partitioner)
+        # Zooms are batched so one call never tracks more than
+        # _RUST_PYRAMID_MAX_TILES tiles at once.
         bands: list[list[int]] = []
         for z in sorted(tiles_by_zoom):
             if bands and sum(len(tiles_by_zoom[b]) for b in bands[-1]) + len(tiles_by_zoom[z]) <= _RUST_PYRAMID_MAX_TILES:
@@ -319,34 +468,8 @@ class DatasetMVTGenerator:
             else:
                 bands.append([z])
         for band in bands:
-            tiles = [t for z in band for t in tiles_by_zoom[z]]
-            st = ds.write_pyramid(
-                str(self.outdir), tiles,
-                feature_capacity=self.feature_capacity, extent=self.extent, buffer=self.buffer,
-                tile_attributes=self.tile_attributes,
-                simplify_tolerance=_tolerance_arg(self.simplify_tolerance, self.extent),
-            )
-            logger.info(
-                "DatasetMVTGenerator[rust] zooms=%s requested=%d written=%d candidates=%d features=%d",
-                band, st["tiles_requested"], st["tiles_written"], st["candidates"], st["features"],
-            )
-
-        tile_counts_by_zoom = _discover_tile_counts_by_zoom(self.outdir)
-        zoom_levels = [z for z, count in enumerate(tile_counts_by_zoom) if count > 0]
-        tile_count = sum(tile_counts_by_zoom)
-        pmtiles_path = None
-        if self.output_format == "pmtiles":
-            pmtiles_path = str(self.pmtiles_path)
-            export_to_pmtiles(
-                mvt_dir=str(self.outdir), output_path=pmtiles_path,
-                tile_type="mvt", compression=self.pmtiles_compression,
-            )
-            if self.outdir.exists():
-                shutil.rmtree(self.outdir)
-        return DatasetMVTGenerationResult(
-            outdir=str(self.outdir), tile_count=tile_count, zoom_levels=zoom_levels,
-            tile_counts_by_zoom=tile_counts_by_zoom, pmtiles_path=pmtiles_path,
-        )
+            write_tiles(f"zooms={band}", [t for z in band for t in tiles_by_zoom[z]])
+        return self._finish()
 
     def _run_map_stage(
         self,
@@ -442,6 +565,7 @@ def _map_split_group(
         prefix_histogram=prefix,
         size_threshold=threshold,
         buffer=partition_buffer,
+        coverage_prefix=load_coverage_prefix(hist_path),
     )
     tiles: dict[int, IntermediateVectorTile] = {}
 

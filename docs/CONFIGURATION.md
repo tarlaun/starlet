@@ -68,6 +68,10 @@ compression = "zstd"
 [mvt]
 zoom = 8
 threshold = 50000
+# Size-threshold mode: 0 (default) builds the fixed pyramid up to `zoom`;
+# e.g. "50kb" pre-generates only tiles estimated to be at least that large,
+# at any zoom up to `size_mode_max_zoom` (22) or an explicit `zoom`.
+min_tile_bytes = 0
 pmtiles = false
 
 [serve]
@@ -101,9 +105,9 @@ The CLI now expects most persistent tuning values to come from config:
 - `starlet tile` keeps run-specific inputs on the command line and loads
   partitioning, histogram, and compression defaults from config. Process-based
   parallelism always comes from `[global].parallelism`.
-- `starlet mvt` keeps dataset path and optional `--zoom` on the command line and
-  loads threshold, PMTiles export settings, buffer, extent, and feature
-  reservoir settings from config.
+- `starlet mvt` keeps dataset path and optional `--zoom` / `--min-tile-bytes`
+  on the command line and loads threshold, PMTiles export settings, buffer,
+  extent, and feature reservoir settings from config.
 - `starlet build` keeps source/output paths plus a few run-specific flags on the
   command line and loads the rest from config, forwarding MVT-related settings
   to the MVT stage.

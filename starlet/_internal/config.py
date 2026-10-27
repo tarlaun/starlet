@@ -33,6 +33,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mvt": {
         "zoom": 7,
         "threshold": 0,
+        "min_tile_bytes": 0,
+        "size_mode_max_zoom": 22,
         "pmtiles": False,
         "feature_capacity": 10_000,
         "tile_attributes": "all",

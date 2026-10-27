@@ -321,6 +321,7 @@ def test_dataset_generator_removes_mvt_dir_after_pmtiles_export(monkeypatch, tmp
     hist_dir = dataset_dir / "histograms"
     parquet_dir.mkdir(parents=True)
     hist_dir.mkdir(parents=True)
+    (parquet_dir / "tile_000000.parquet").write_bytes(b"fake")
     (hist_dir / "global_prefix.npy").write_bytes(b"fake")
 
     generator = DatasetMVTGenerator(

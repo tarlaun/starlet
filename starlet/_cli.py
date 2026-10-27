@@ -136,9 +136,12 @@ def tile(
 
 @main.command()
 @click.option("--dir", "tile_dir", required=True, help="Dataset directory with parquet_tiles/ and histograms/.")
-@click.option("--zoom", type=int, default=None, help="Maximum zoom level.")
+@click.option("--zoom", type=int, default=None, help="Maximum zoom level (an upper bound with --min-tile-bytes).")
 @click.option("--outdir", default=None, help="MVT output directory (default: <dir>/mvt/).")
 @click.option("--threshold", type=float, default=None, help="Minimum feature threshold.")
+@click.option("--min-tile-bytes", default=None,
+              help="Size-threshold mode: generate every tile estimated to be at least this large "
+                   "(e.g. 50kb) instead of a fixed zoom range; smaller tiles are served on the fly.")
 @click.option("--parallelism", type=int, default=None, help="Shared worker count used for MVT generation.")
 @click.option("--temp-dir", default=None, help="Parent directory for temporary MVT files.")
 @click.option("--feature-capacity", type=int, default=None, help="Maximum features larger than a display pixel kept per tile (default 10000).")
@@ -148,14 +151,15 @@ def tile(
 @click.option("--pmtiles-compression", default=None, help="Compression for PMTiles export.")
 @click.option("--pmtiles/--no-pmtiles", default=None, help="Export generated tiles to a PMTiles archive.")
 @click.option("--log-level", default=None, help="Logging level.")
-def mvt(tile_dir, zoom, outdir, threshold, parallelism, temp_dir, feature_capacity, tile_attributes, extent, buffer, pmtiles_compression, pmtiles, log_level):
+def mvt(tile_dir, zoom, outdir, threshold, min_tile_bytes, parallelism, temp_dir, feature_capacity, tile_attributes, extent, buffer, pmtiles_compression, pmtiles, log_level):
     """Generate Mapbox Vector Tiles from a tiled dataset."""
     _setup_logging(_resolved_log_level("mvt", log_level))
     import starlet
 
     result = starlet.generate_mvt(
         tile_dir=tile_dir,
-        zoom=int(resolve_command_value("mvt", "zoom", zoom)),
+        zoom=zoom,
+        min_tile_bytes=min_tile_bytes,
         threshold=float(resolve_command_value("mvt", "threshold", threshold)),
         pmtiles=bool(resolve_command_value("mvt", "pmtiles", pmtiles)),
         pmtiles_compression=str(resolve_command_value("mvt", "pmtiles_compression", pmtiles_compression)),
@@ -191,6 +195,9 @@ def mvt(tile_dir, zoom, outdir, threshold, parallelism, temp_dir, feature_capaci
 @click.option("--dtype", "histogram_dtype", default=None, help="Histogram data type.")
 @click.option("--sfc-bits", type=int, default=None, help="Bits per axis for Z-order / Hilbert key.")
 @click.option("--threshold", type=float, default=None, help="Minimum feature threshold.")
+@click.option("--min-tile-bytes", default=None,
+              help="Size-threshold mode: generate every tile estimated to be at least this large "
+                   "(e.g. 50kb) instead of a fixed zoom range; smaller tiles are served on the fly.")
 @click.option("--feature-capacity", type=int, default=None, help="Maximum features larger than a display pixel kept per tile (default 10000).")
 @click.option("--tile-attributes", default=None, help="Attribute columns written into tiles: all (default), none, or a comma-separated list.")
 @click.option("--extent", type=int, default=None, help="Vector tile extent.")
@@ -221,6 +228,7 @@ def build(
     histogram_dtype,
     sfc_bits,
     threshold,
+    min_tile_bytes,
     feature_capacity,
     tile_attributes,
     extent,
@@ -242,7 +250,8 @@ def build(
     tile_result, mvt_result, pmtiles_path = starlet.build(
         input=input_path,
         outdir=outdir,
-        zoom=int(resolve_command_value("build", "zoom", zoom, fallback_sections=("mvt",))),
+        zoom=zoom,
+        min_tile_bytes=min_tile_bytes,
         partition_size=parse_size_value(resolve_command_value("build", "partition_size", partition_size, fallback_sections=("tile",))),
         threshold=float(resolve_command_value("build", "threshold", threshold, fallback_sections=("mvt",))),
         pmtiles=bool(resolve_command_value("build", "pmtiles", pmtiles, fallback_sections=("mvt",))),

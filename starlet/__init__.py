@@ -124,18 +124,9 @@ def tile(
     -------
     TileResult
     """
-    import logging
-    import math
-    from pathlib import Path
-
-    from starlet._internal.tiling.datasource import read_spatial_sample, source_for_path
-    from starlet._internal.tiling.geojson_source import is_geojson_path
-    from starlet._internal.tiling.assigner import RSGroveAssigner
-    from starlet._internal.tiling.two_stage_orchestrator import TwoStageOrchestrator
+    from starlet._internal.tiling.compressed import materialized_input
     from starlet._internal.tiling.writer_pool import SortMode
-    from starlet._internal.histogram.hist_pyramid import build_histograms_for_dir
 
-    logger = logging.getLogger("starlet.tile")
     parallelism = command_parallelism("tile", explicit=parallelism)
     partition_size = parse_size_value(resolve_command_value("tile", "partition_size", partition_size))
     sort = str(resolve_command_value("tile", "sort", sort))
@@ -160,6 +151,69 @@ def tile(
         "hilbert": SortMode.HILBERT,
     }
     sort_mode = _sort_map.get(sort.strip().lower(), SortMode.ZORDER)
+
+    # Compressed single files (.geojson.gz, .json.bz2, ...) are decompressed
+    # into the temp directory for the duration of the run.
+    with materialized_input(input, temp_dir) as input_path:
+        return _tile_impl(
+            input_path,
+            outdir,
+            parallelism=parallelism,
+            partition_size=partition_size,
+            compression=compression,
+            sample_cap=sample_cap,
+            sample_ratio=sample_ratio,
+            seed=seed,
+            geom_col=geom_col,
+            sfc_bits=sfc_bits,
+            covering_bbox=covering_bbox,
+            csv_x_col=csv_x_col,
+            csv_y_col=csv_y_col,
+            csv_wkt_col=csv_wkt_col,
+            csv_split_size=csv_split_size,
+            src_crs=src_crs,
+            temp_dir=temp_dir,
+            grid_size=grid_size,
+            histogram_dtype=histogram_dtype,
+            sort_mode=sort_mode,
+        )
+
+
+def _tile_impl(
+    input: str,
+    outdir: str,
+    *,
+    parallelism,
+    partition_size,
+    compression,
+    sample_cap,
+    sample_ratio,
+    seed,
+    geom_col,
+    sfc_bits,
+    covering_bbox,
+    csv_x_col,
+    csv_y_col,
+    csv_wkt_col,
+    csv_split_size,
+    src_crs,
+    temp_dir,
+    grid_size,
+    histogram_dtype,
+    sort_mode,
+) -> TileResult:
+    """:func:`tile` after option resolution, on a readable (decompressed) input."""
+    import logging
+    import math
+    from pathlib import Path
+
+    from starlet._internal.tiling.datasource import read_spatial_sample, source_for_path
+    from starlet._internal.tiling.geojson_source import is_geojson_path
+    from starlet._internal.tiling.assigner import RSGroveAssigner
+    from starlet._internal.tiling.two_stage_orchestrator import TwoStageOrchestrator
+    from starlet._internal.histogram.hist_pyramid import build_histograms_for_dir
+
+    logger = logging.getLogger("starlet.tile")
 
     # Build data source and choose a format-appropriate default size.
     source = source_for_path(
@@ -207,15 +261,29 @@ def tile(
         geoparquet_workers=parallelism,
         source_workers=parallelism,
     )
+    tiles_dir = str(Path(outdir) / "parquet_tiles")
+    hist_dir = str(Path(outdir) / "histograms")
+
+    if spatial_sample.total_seen == 0:
+        # Empty input: produce an empty dataset instead of failing. Downstream
+        # steps (MVT generation, serving) treat a dataset without partitions as
+        # having no tiles.
+        logger.warning("Input %s contains no geometries; writing an empty dataset to %s", input, outdir)
+        Path(tiles_dir).mkdir(parents=True, exist_ok=True)
+        return TileResult(
+            outdir=outdir,
+            num_files=0,
+            total_rows=0,
+            bbox=(0.0, 0.0, 0.0, 0.0),
+            histogram_path=str(Path(hist_dir) / "global_prefix.npy"),
+        )
+
     assigner = RSGroveAssigner.from_sample_and_mbr(
         sample_points=spatial_sample.sample_points,
         mbr=spatial_sample.mbr,
         num_partitions=target_partitions,
         geom_col=geom_col,
     )
-
-    tiles_dir = str(Path(outdir) / "parquet_tiles")
-    hist_dir = str(Path(outdir) / "histograms")
 
     tiling_orchestrator = TwoStageOrchestrator(
         source=source,
@@ -275,6 +343,7 @@ def generate_mvt(
     extent: int | None = None,
     buffer: int | None = None,
     tile_attributes: str | list[str] | None = None,
+    min_tile_bytes: int | str | None = None,
 ) -> MVTResult:
     """Generate Mapbox Vector Tiles from a tiled dataset.
 
@@ -283,9 +352,17 @@ def generate_mvt(
     tile_dir : str
         Dataset directory containing ``parquet_tiles/`` and ``histograms/``.
     zoom : int
-        Maximum zoom level.
+        Maximum zoom level. With ``min_tile_bytes`` it is only an upper bound
+        and defaults to ``mvt.size_mode_max_zoom`` (22) when not given.
     threshold : float
-        Minimum feature count per tile.
+        Minimum estimated density (vertices or covering features) per tile.
+    min_tile_bytes : int | str
+        Size-threshold mode. When positive (``50_000`` or ``"50kb"``), tiles
+        are generated zoom by zoom and only those whose encoded size is
+        estimated to be at least this many uncompressed bytes are written and
+        descended into; smaller tiles are left to on-the-fly generation. Zoom
+        0 is always written. ``0`` (default) generates the full pyramid up to
+        ``zoom``.
     pmtiles : bool
         If True, also export the generated tiles to a PMTiles archive.
     pmtiles_compression : str
@@ -313,6 +390,11 @@ def generate_mvt(
     """
     from pathlib import Path
 
+    min_tile_bytes = parse_size_value(resolve_command_value("mvt", "min_tile_bytes", min_tile_bytes)) or 0
+    if min_tile_bytes < 0:
+        raise ValueError("min_tile_bytes must be non-negative")
+    if zoom is None and min_tile_bytes > 0:
+        zoom = int(resolve_command_value("mvt", "size_mode_max_zoom", None) or 22)
     zoom = int(resolve_command_value("mvt", "zoom", zoom))
     threshold = float(resolve_command_value("mvt", "threshold", threshold))
     pmtiles = bool(resolve_command_value("mvt", "pmtiles", pmtiles))
@@ -345,6 +427,7 @@ def generate_mvt(
         extent=extent,
         buffer=buffer,
         tile_attributes=tile_attributes,
+        min_tile_bytes=min_tile_bytes,
     ).run()
 
     generated_pmtiles_path = getattr(result, "pmtiles_path", None)
@@ -376,6 +459,7 @@ def build(
     extent: int | None = None,
     buffer: int | None = None,
     tile_attributes: str | list[str] | None = None,
+    min_tile_bytes: int | str | None = None,
     **tile_kwargs,
 ) -> tuple[TileResult, MVTResult, str | None]:
     """Run the full pipeline: tile then generate MVTs.
@@ -387,7 +471,10 @@ def build(
     outdir : str
         Output dataset directory.
     zoom : int
-        Maximum zoom level for MVT generation.
+        Maximum zoom level for MVT generation (an upper bound in
+        ``min_tile_bytes`` mode).
+    min_tile_bytes : int | str
+        Size-threshold mode, see :func:`generate_mvt`.
     parallelism : int | None
         Shared worker count used across tiling and MVT generation.
     partition_size : int | None
@@ -433,6 +520,11 @@ def build(
     partition_size = parse_size_value(
         resolve_command_value("build", "partition_size", partition_size, fallback_sections=("tile",))
     )
+    min_tile_bytes = parse_size_value(
+        resolve_command_value("build", "min_tile_bytes", min_tile_bytes, fallback_sections=("mvt",))
+    ) or 0
+    if zoom is None and min_tile_bytes > 0:
+        zoom = int(resolve_command_value("build", "size_mode_max_zoom", None, fallback_sections=("mvt",)) or 22)
     zoom = int(resolve_command_value("build", "zoom", zoom, fallback_sections=("mvt",)))
     threshold = float(resolve_command_value("build", "threshold", threshold, fallback_sections=("mvt",)))
     pmtiles = bool(resolve_command_value("build", "pmtiles", pmtiles, fallback_sections=("mvt",)))
@@ -519,6 +611,7 @@ def build(
         extent=extent,
         buffer=buffer,
         tile_attributes=tile_attributes,
+        min_tile_bytes=min_tile_bytes,
     )
 
     return tile_result, mvt_result, mvt_result.pmtiles_path

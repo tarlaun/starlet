@@ -63,11 +63,12 @@ full option list.
 | Option | Commands | Default | Description |
 |--------|----------|---------|-------------|
 | `--input` / `--outdir` | build, tile | required | Source file and output dataset directory |
-| `--zoom` | build, mvt | `7` | Maximum vector-tile zoom level |
+| `--zoom` | build, mvt | `7` | Maximum vector-tile zoom level (an upper bound with `--min-tile-bytes`) |
+| `--min-tile-bytes` | build, mvt | off | Size-threshold mode: pre-generate every tile estimated to be at least this large (e.g. `50kb`), whatever its zoom; smaller tiles are served on the fly (see below) |
 | `--geom-col` | build, tile | `geometry` | Geometry column name (use `wkb_geometry` for OGR/`ogr2ogr` exports) |
 | `--partition-size` | build, tile | `128mb` GeoParquet / `512mb` GeoJSON | Target tile size, e.g. `256mb`, `1gb` |
 | `--pmtiles` | build, mvt | off | Also export a single `.pmtiles` archive |
-| `--threshold` | build, mvt | `0` | Minimum feature count for a tile to be generated |
+| `--threshold` | build, mvt | `0` | Minimum estimated density (vertices or covering features) for a tile to be generated |
 | `--feature-capacity` | build, mvt | `10000` | Max features *larger than a pixel* kept per tile (see below) |
 | `--tile-attributes` | build, mvt, serve | `all` | Attribute columns written into tiles: `all`, `none`, or `name,class,…` (see below) |
 | `--dir` | serve, mvt, info | required | Dataset directory (or the root of several, for `serve`) |
@@ -93,6 +94,25 @@ attributes from the server
 (`GET /datasets/<dataset>/features/at.json?mbr=minx,miny,maxx,maxy`), so they
 are always available, whatever the tiles carry.
 
+### Pre-generate by tile size instead of by zoom
+
+A fixed `--zoom` either stops too early for dense areas or wastes time on
+thousands of tiny tiles elsewhere. `--min-tile-bytes` turns the pyramid into a
+size-threshold build: zoom 0 is always written, then zoom by zoom only the
+tiles whose encoded size is estimated to reach the threshold are generated
+and descended into. The estimate uses the dataset's vertex histogram,
+calibrated against the sizes of the tiles actually written at the previous
+zoom (so it adapts to the data and to `--feature-capacity` /
+`--tile-attributes`). Everything below the threshold is cheap to render and is
+left to the on-the-fly server. `--zoom` still caps the depth (default 22 in
+this mode). Sizes are uncompressed MVT bytes and an estimate: expect a few
+small tiles to be pre-generated too, rarely the other way round.
+
+```bash
+# Pre-generate every tile that would be ~50 KB or more, at any zoom
+starlet build --input states.parquet --outdir datasets/states --min-tile-bytes 50kb
+```
+
 ### Examples
 
 ```bash
@@ -111,10 +131,16 @@ starlet info --dir datasets/roads
 
 ## Input formats
 
-Starlet reads **GeoParquet**, **GeoJSON**, and **CSV** (with either `x`/`y`
-columns or a WKT column — see `starlet tile --help`). Source data is assumed to
-be longitude/latitude (EPSG:4326); tiles are produced in Web Mercator
-(EPSG:3857).
+Starlet reads **GeoParquet** (WKB or native GeoArrow geometry encodings),
+**GeoJSON** / **GeoJSON Lines**, **Shapefile** (`.shp`, zipped), **File
+Geodatabase**, **GeoPackage**, **FlatGeobuf** (and other single-file OGR
+formats such as GML/KML), and **CSV** (with either `x`/`y` columns or a WKT
+column — see `starlet tile --help`). Gzip/bzip2/xz-compressed files
+(`.geojson.gz`, ...) are decompressed on the fly. The CRS is taken from the
+file (GeoParquet metadata, the GeoJSON `crs` member, OGR layer CRS) and
+defaults to longitude/latitude (EPSG:4326); tiles are produced in Web
+Mercator (EPSG:3857). GeometryCollection features are split into one feature
+per geometry type, since vector tiles have no collection type.
 
 ## One-file distribution with PMTiles
 

@@ -34,6 +34,9 @@ All functions below are available directly from the `starlet` package.
 ## Coordinate And Geometry Conventions
 
 - Bounding boxes are tuples: `(minx, miny, maxx, maxy)`.
+- `TileResult.bbox` and `Dataset.bbox` are always longitude/latitude
+  (`EPSG:4326`), whatever the input CRS or geometry column name;
+  `Dataset.source_bbox` keeps the extent in the dataset's own CRS.
 - Query geometries can be:
   - a bounding box tuple,
   - a GeoJSON geometry dictionary,
@@ -316,8 +319,10 @@ Supported sources:
 
 | Source | Accepted input path | Geometry configuration | Notes |
 | --- | --- | --- | --- |
-| GeoParquet | `.parquet`, `.geoparquet`, or a directory containing only GeoParquet files | `geom_col="geometry"` by default | Reads Parquet row groups as splits. Geometry-only sampling reads only the geometry column. |
-| GeoJSON | `.geojson`, `.geojsonl`, `.json`, `.jsonl`, or a directory containing only GeoJSON files | Geometry comes from GeoJSON feature geometry | FeatureCollection inputs are byte-partitioned; GeoJSONL is streamed by feature records. |
+| GeoParquet | `.parquet`, `.geoparquet`, or a directory containing only GeoParquet files | `geom_col="geometry"` by default; the GeoParquet primary column is detected otherwise | Reads Parquet row groups as splits. WKB and native GeoArrow encodings (`point` ... `multipolygon`, struct or interleaved coordinates) are accepted; native columns are converted to WKB on read. Geometry-only sampling reads only the geometry column. |
+| GeoJSON | `.geojson`, `.geojsonl`, `.json`, `.jsonl`, or a directory containing only GeoJSON files | Geometry comes from GeoJSON feature geometry | FeatureCollection inputs are byte-partitioned; GeoJSONL is streamed by feature records. A FeatureCollection `crs` member (e.g. `urn:ogc:def:crs:EPSG::3857`) is honoured. Empty collections produce an empty dataset. |
+| GeoPackage / FlatGeobuf / other OGR files | `.gpkg`, `.fgb`, `.sqlite`, `.gml`, `.kml`, `.tab`, `.mif`, or a directory of such files | Geometry comes from each layer | Uses `pyogrio`; every layer of the file is read. |
+| Compressed files | `.gz`, `.bz2`, `.xz` around any single-file source (`states.geojson.gz`) | As the inner format | Decompressed into the temp directory for the duration of the run. |
 | Shapefile | `.shp`, `.zip` containing shapefile sidecars, or a directory containing `.shp` and/or `.zip` files | Geometry comes from the Shapefile geometry | Uses `pyogrio`. Feature-range splits are used when feature counts are available. Geometry-only sampling reads geometry without attributes. |
 | CSV/TSV | `.csv`, `.tsv`, or a directory containing only CSV/TSV files | Use either `csv_x_col` + `csv_y_col`, or `csv_wkt_col` | Files are read in row chunks. `src_crs` provides the CRS hint. |
 | File Geodatabase | `.gdb` directory, `.gdb.zip` archive, or a directory containing `.gdb` directories | Geometry comes from each GDB layer | Uses `pyogrio`. Multiple layers are read as separate splits. Zipped GDBs are extracted to a temp cache before reading. |
@@ -335,8 +340,11 @@ result = starlet.tile(
 )
 ```
 
-Returns a `TileResult` with output path, file count, row count, bounds, and
-histogram path.
+Returns a `TileResult` with output path, file count, row count, bounds (lon/lat),
+and histogram path. Input columns named like starlet's internal columns
+(`_tile_id`, `_bbox_xmin` ...) are kept under a `_src` suffix.
+GeometryCollection rows are split into one row per geometry type (same
+attributes) because vector tiles cannot carry collections.
 
 Run the full pipeline with vector-tile generation:
 
@@ -349,6 +357,36 @@ tile_result, mvt_result, pmtiles_path = starlet.build(
     zoom=10,
 )
 ```
+
+### Size-Threshold Pyramids
+
+`starlet.generate_mvt()` and `starlet.build()` accept `min_tile_bytes`
+(an int or a size string such as `"50kb"`; config key `mvt.min_tile_bytes`).
+Instead of generating every tile up to `zoom`, the pyramid is built zoom by
+zoom and only tiles whose encoded size is *estimated* to be at least
+`min_tile_bytes` are written and descended into; smaller tiles are left to
+on-the-fly generation. Zoom 0 is always written. The estimate is the tile's
+vertex count from the dataset histogram times the bytes-per-vertex observed
+on the tiles written at the previous zoom (90th percentile, extrapolated with
+the observed growth), so it adapts to the data and to `feature_capacity` /
+`tile_attributes`. It deliberately errs towards generating a few small tiles
+rather than missing large ones. `zoom` becomes an upper bound and defaults to
+`mvt.size_mode_max_zoom` (22) in this mode. Size-threshold mode needs the
+pyramid engines (EPSG:4326 datasets; not the legacy map/reduce path).
+
+```python
+tile_result, mvt_result, _ = starlet.build(
+    input="data/states.parquet",
+    outdir="datasets/states",
+    min_tile_bytes="50kb",
+)
+print(mvt_result.tile_counts_by_zoom)  # e.g. [1, 2, 3, 5, 6, 1]
+```
+
+PMTiles archives written by `build()` / `generate_mvt(pmtiles=True)` carry
+TileJSON metadata (`name`, `bounds`, `center`, zoom range, `vector_layers`
+with field types from the dataset statistics) and lon/lat header bounds, so
+MapLibre and the PMTiles viewer fit the map to the data.
 
 ### GeoParquet Sources
 

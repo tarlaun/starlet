@@ -89,7 +89,7 @@ buffer = 64
 
     captured = {}
 
-    def fake_generate_mvt(*, tile_dir, zoom, threshold, pmtiles, pmtiles_compression, outdir, parallelism, temp_dir, feature_capacity, extent, buffer, tile_attributes=None):
+    def fake_generate_mvt(*, tile_dir, zoom, threshold, pmtiles, pmtiles_compression, outdir, parallelism, temp_dir, feature_capacity, extent, buffer, tile_attributes=None, min_tile_bytes=None):
         captured.update(
             tile_dir=tile_dir,
             zoom=zoom,
