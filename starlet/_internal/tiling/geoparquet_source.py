@@ -24,6 +24,12 @@ from starlet._internal.tiling.datasource import (
     _split_sample_cap,
     _source_files,
 )
+from starlet._internal.tiling.geoarrow import (
+    geoarrow_to_wkb,
+    is_wkb_type,
+    native_geometry_type,
+    wkb_schema,
+)
 from starlet._internal.tiling.utils_large import ensure_large_types
 
 logger = logging.getLogger(__name__)
@@ -52,8 +58,23 @@ class GeoParquetSource(DataSource):
             raise ValueError(f"No GeoParquet files found in {self.path}")
 
         pf = pq.ParquetFile(str(self._files[0]))
-        self._schema = pf.schema_arrow
-        self.geom_col = _resolve_geometry_column(self._schema, geom_col)
+        file_schema = pf.schema_arrow
+        self.geom_col = _resolve_geometry_column(file_schema, geom_col)
+        # Native GeoArrow geometry (GeoParquet 1.1 "point"/"polygon"/...
+        # encodings) is converted to WKB on read so the rest of the pipeline
+        # sees the schema it expects.
+        self._native_geometry_type = native_geometry_type(
+            file_schema.field(self.geom_col), _geo_encoding(file_schema, self.geom_col)
+        )
+        if self._native_geometry_type is not None:
+            self._schema = wkb_schema(file_schema, self.geom_col, _geo_crs(file_schema, self.geom_col))
+            logger.info(
+                "GeoParquet geometry column %r uses native GeoArrow encoding (%s); converting to WKB on read",
+                self.geom_col,
+                getattr(self._native_geometry_type, "name", self._native_geometry_type),
+            )
+        else:
+            self._schema = file_schema
         self._row_group_counts = {
             str(file_path): pq.ParquetFile(str(file_path)).num_row_groups
             for file_path in self._files
@@ -119,7 +140,16 @@ class GeoParquetSource(DataSource):
                     num_row_groups,
                     source_split.path,
                 )
-                yield pf.read_row_group(row_group, columns=selected_columns)
+                table = pf.read_row_group(row_group, columns=selected_columns)
+                if self._native_geometry_type is not None:
+                    table = self._convert_native_geometry(table)
+                yield table
+
+    def _convert_native_geometry(self, table: pa.Table) -> pa.Table:
+        index = table.schema.get_field_index(self.geom_col)
+        wkb = geoarrow_to_wkb(table.column(index), self._native_geometry_type)
+        table = table.set_column(index, pa.field(self.geom_col, pa.binary(), nullable=True), wkb)
+        return table.replace_schema_metadata(self._schema.metadata)
 
     @classmethod
     def read_spatial_sample(
@@ -199,14 +229,23 @@ def _resolve_geometry_column(schema: pa.Schema, requested: str) -> str:
                 )
                 return name
 
+        for name, column_meta in columns.items():
+            if name in schema.names and str((column_meta or {}).get("encoding", "")).lower() in _NATIVE_ENCODINGS:
+                logger.info(
+                    "Using native GeoArrow GeoParquet geometry column %r instead of missing %r",
+                    name,
+                    requested,
+                )
+                return name
+
     geoarrow_columns = [
         field.name
         for field in schema
-        if (field.metadata or {}).get(b"ARROW:extension:name") == b"geoarrow.wkb"
+        if ((field.metadata or {}).get(b"ARROW:extension:name") or b"").startswith(b"geoarrow.")
     ]
     if geoarrow_columns:
         logger.info(
-            "Using GeoArrow WKB geometry column %r instead of missing %r",
+            "Using GeoArrow geometry column %r instead of missing %r",
             geoarrow_columns[0],
             requested,
         )
@@ -226,6 +265,29 @@ def _resolve_geometry_column(schema: pa.Schema, requested: str) -> str:
         f"Geometry column {requested!r} was not found and no GeoParquet "
         f"primary geometry column could be detected. Available columns: {schema.names}"
     )
+
+
+_NATIVE_ENCODINGS = {"point", "linestring", "polygon", "multipoint", "multilinestring", "multipolygon", "wkt"}
+
+
+def _geo_column_meta(schema: pa.Schema, geom_col: str) -> dict:
+    raw_geo = (schema.metadata or {}).get(b"geo")
+    if not raw_geo:
+        return {}
+    try:
+        geo = json.loads(raw_geo.decode("utf-8"))
+    except Exception:
+        return {}
+    return dict((geo.get("columns") or {}).get(geom_col) or {})
+
+
+def _geo_encoding(schema: pa.Schema, geom_col: str) -> Optional[str]:
+    encoding = _geo_column_meta(schema, geom_col).get("encoding")
+    return str(encoding) if encoding is not None else None
+
+
+def _geo_crs(schema: pa.Schema, geom_col: str):
+    return _geo_column_meta(schema, geom_col).get("crs")
 
 
 def _read_geoparquet_spatial_sample(

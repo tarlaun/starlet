@@ -19,6 +19,7 @@ from starlet._internal.tiling.datasource import (
     DataSource,
     _GDB_SUFFIXES,
     _SHAPEFILE_SUFFIXES,
+    _VECTOR_FILE_SUFFIXES,
     _ZIP_SUFFIXES,
     _attach_geoparquet_metadata,
     _normalize_decimal_columns,
@@ -319,6 +320,25 @@ class GDBSource(_OGRVectorSource):
         for gdb_path in gdb_paths:
             layers.extend(self._layers_for_dataset(str(gdb_path)))
         return layers
+
+
+class VectorFileSource(_OGRVectorSource):
+    """Single-file OGR formats (FlatGeobuf, GeoPackage, SpatiaLite, GML, KML,
+    MapInfo) read through pyogrio; a directory reads every such file."""
+
+    def _discover_layers(self, path: str) -> List[_VectorLayer]:
+        source = Path(path)
+        if source.is_file():
+            if source.suffix.lower() not in _VECTOR_FILE_SUFFIXES:
+                raise ValueError(f"Not a supported vector file: {path}")
+            return self._layers_for_dataset(str(source))
+        if source.is_dir():
+            layers: List[_VectorLayer] = []
+            for file_path in sorted(source.rglob("*")):
+                if file_path.is_file() and file_path.suffix.lower() in _VECTOR_FILE_SUFFIXES:
+                    layers.extend(self._layers_for_dataset(str(file_path)))
+            return layers
+        raise FileNotFoundError(f"Source path does not exist: {path}")
 
 
 def _zip_vsi_path(path: Path) -> str:

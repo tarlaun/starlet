@@ -22,6 +22,8 @@ _GEOPARQUET_SUFFIXES = (".parquet", ".geoparquet")
 _GEOJSON_SUFFIXES = (".geojson", ".geojsonl", ".json", ".jsonl")
 _CSV_SUFFIXES = (".csv",".tsv",)
 _SHAPEFILE_SUFFIXES = (".shp",)
+# Single-file OGR formats read through pyogrio.
+_VECTOR_FILE_SUFFIXES = (".fgb", ".gpkg", ".sqlite", ".gml", ".kml", ".tab", ".mif")
 _ZIP_SUFFIXES = (".zip",)
 _GDB_SUFFIXES = (".gdb",)
 
@@ -95,6 +97,13 @@ def _source_kind(path: str) -> str:
             return "csv"
         if suffix in _ZIP_SUFFIXES and _zip_gdb_member_dirs(source_path):
             return "gdb"
+        if suffix in _VECTOR_FILE_SUFFIXES:
+            return "vector"
+        if suffix in (".gz", ".bz2", ".xz"):
+            raise ValueError(
+                f"Compressed input {path} must be decompressed first "
+                "(starlet.tile / the CLI do this automatically)"
+            )
         if suffix in _SHAPEFILE_SUFFIXES or suffix in _ZIP_SUFFIXES:
             return "shapefile"
         raise ValueError(f"Unsupported source file type: {path}")
@@ -111,6 +120,8 @@ def _source_kind(path: str) -> str:
         source_types.append("csv")
     if _source_files(path, _SHAPEFILE_SUFFIXES) or _source_files(path, _ZIP_SUFFIXES):
         source_types.append("shapefile")
+    if _source_files(path, _VECTOR_FILE_SUFFIXES):
+        source_types.append("vector")
     if sorted(child for child in source_path.rglob("*.gdb") if child.is_dir()):
         source_types.append("gdb")
 
@@ -154,6 +165,8 @@ def source_for_path(
         return ShapefileSource(path, geom_col=geom_col)
     if kind == "gdb":
         return GDBSource(path, geom_col=geom_col)
+    if kind == "vector":
+        return VectorFileSource(path, geom_col=geom_col)
     raise ValueError(f"Unsupported source: {path}")
 
 
@@ -220,6 +233,8 @@ def read_spatial_sample(
         source = ShapefileSource(path, geometry_only=True, geom_col=geom_col)
     elif isinstance(source, GDBSource):
         source = GDBSource(path, geometry_only=True, geom_col=geom_col)
+    elif isinstance(source, VectorFileSource):
+        source = VectorFileSource(path, geometry_only=True, geom_col=geom_col)
     return _read_datasource_spatial_sample(
         source,
         geom_col=geom_col,
@@ -270,9 +285,15 @@ def _combine_spatial_samples(parts: List[SpatialSample]) -> SpatialSample:
     logger.info("Finished the partitions ... merging")
     non_empty = [part for part in parts if part.total_seen > 0]
     if not non_empty:
-        raise ValueError(
-            "No geometries sampled to build RSGrove index. "
-            "Increase --sample-ratio or provide --sample-cap."
+        # Empty input (no features / no geometries): report it instead of
+        # failing so callers can produce an empty dataset.
+        logger.warning("No geometries found in the input; the dataset will be empty")
+        return SpatialSample(
+            sample_points=np.empty((2, 0), dtype=np.float64),
+            mbr=EnvelopeNDLite(np.zeros(2), np.zeros(2)),
+            total_seen=0,
+            total_sampled=0,
+            batches_read=sum(part.batches_read for part in parts),
         )
 
     sampled = [part.sample_points for part in non_empty if part.sample_points.shape[1] > 0]
@@ -628,4 +649,4 @@ def _normalize_decimal_columns(df: pd.DataFrame) -> pd.DataFrame:
 from starlet._internal.tiling.geojson_source import GeoJSONSource, GeoJSONSplit
 from starlet._internal.tiling.geoparquet_source import GeoParquetSource, GeoParquetSplit
 from starlet._internal.tiling.csv_source import CSVSource, CSVSplit
-from starlet._internal.tiling.vector_source import GDBSource, ShapefileSource, VectorLayerSplit
+from starlet._internal.tiling.vector_source import GDBSource, ShapefileSource, VectorFileSource, VectorLayerSplit

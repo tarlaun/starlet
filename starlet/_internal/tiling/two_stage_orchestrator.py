@@ -69,11 +69,46 @@ def _table_with_partition_column(original_table: pa.Table, partition_table: pa.T
             f"{partition_table.num_rows} != {original_table.num_rows}"
         )
     if _TILE_COL in original_table.column_names:
-        raise ValueError(f"input table already contains internal column {_TILE_COL!r}")
+        raise ValueError(
+            f"input table already contains internal column {_TILE_COL!r}; "
+            "rename it with rename_reserved_columns() before assignment"
+        )
     return original_table.append_column(
         _TILE_COL,
         partition_table.column(0).cast(pa.int64()),
     )
+
+
+RESERVED_COLUMNS = (_TILE_COL, "_bbox_xmin", "_bbox_ymin", "_bbox_xmax", "_bbox_ymax")
+RESERVED_SUFFIX = "_src"
+
+
+def reserved_column_renames(names: Sequence[str]) -> Dict[str, str]:
+    """Input columns clashing with starlet's internal columns -> new names.
+
+    ``_tile_id`` and the ``_bbox_*`` covering columns are appended by the
+    tiling stage; an input that already has them (e.g. a re-ingested starlet
+    partition) would otherwise fail or get corrupted bbox pruning.
+    """
+    existing = set(names)
+    renames: Dict[str, str] = {}
+    for name in names:
+        if name not in RESERVED_COLUMNS:
+            continue
+        candidate = f"{name}{RESERVED_SUFFIX}"
+        counter = 1
+        while candidate in existing:
+            counter += 1
+            candidate = f"{name}{RESERVED_SUFFIX}{counter}"
+        existing.add(candidate)
+        renames[name] = candidate
+    return renames
+
+
+def rename_reserved_columns(table: pa.Table, renames: Dict[str, str]) -> pa.Table:
+    if not renames:
+        return table
+    return table.rename_columns([renames.get(name, name) for name in table.column_names])
 
 
 def _group_table_by_reducer(table: pa.Table, num_reducers: int) -> Dict[int, pa.Table]:
@@ -407,7 +442,10 @@ def _assignment_stage_worker(
     compression: Optional[str],
     collect_stats: bool = False,
     geom_col: str = "geometry",
+    column_renames: Optional[Dict[str, str]] = None,
 ) -> _ShardManifest:
+    from starlet._internal.tiling.geometry_collections import explode_geometry_collections
+
     split_dir = Path(temp_dir) / f"split_{split_index:06d}"
     split_dir.mkdir(parents=True, exist_ok=True)
 
@@ -426,6 +464,9 @@ def _assignment_stage_worker(
         rows_read += table.num_rows
         if table.num_rows == 0:
             continue
+        if column_renames:
+            table = rename_reserved_columns(table, column_renames)
+        table = explode_geometry_collections(table, geom_col)
 
         if collect_stats:
             if stats_collector is None:
@@ -599,7 +640,13 @@ class TwoStageOrchestrator:
             # GeoJSON batches can expose different property/tag keys, and process
             # workers receive independent source copies. Inferring once here makes
             # every mapper coerce to the same Arrow schema before shuffle writes.
-            self.source.schema()
+            schema = self.source.schema()
+            self._column_renames = reserved_column_renames(list(schema.names))
+            if self._column_renames:
+                logger.warning(
+                    "Input columns clash with starlet's internal columns and are renamed: %s",
+                    ", ".join(f"{old} -> {new}" for old, new in self._column_renames.items()),
+                )
             splits = list(self.source.create_splits())
             if not splits:
                 logger.info("TwoStageOrchestrator: source returned no splits")
@@ -673,6 +720,7 @@ class TwoStageOrchestrator:
                     self.compression,
                     self.collect_stats,
                     self.geom_col,
+                    getattr(self, "_column_renames", None),
                 )
                 for split_index, split in enumerate(splits)
             ]

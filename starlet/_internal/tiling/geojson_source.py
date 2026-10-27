@@ -6,6 +6,7 @@ import io
 import json
 import logging
 from numbers import Number
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import ijson
@@ -79,7 +80,9 @@ class GeoJSONSource(DataSource):
             )
 
         self._schema: Optional[pa.Schema] = None
-        self._crs_hint: Optional[str] = _extract_feature_collection_crs_hint(str(self._files[0]))
+        self._crs_hint: Optional[str] = _feature_collection_crs_hint_from_file(self._files[0])
+        if self._crs_hint:
+            logger.info("GeoJSON %s declares crs %s", self._files[0], self._crs_hint)
 
         logger.info(
             "GeoJSONSource opened %s with %d files (batch_rows=%d, src_crs=%s)",
@@ -449,37 +452,102 @@ def _geojson_partition_ranges(file_size: int, num_splits: int) -> List[tuple[int
     return ranges
 
 
+_CRS_SCAN_BYTES = 64 * 1024
+
+
+def _feature_collection_crs_hint_from_file(path) -> Optional[str]:
+    """CRS declared by a FeatureCollection's (deprecated but common) ``crs``
+    member. Only the first and last 64 KiB of the file are read: the member
+    sits either before ``"features"`` or after it."""
+    file_path = Path(path)
+    try:
+        size = file_path.stat().st_size
+        with open(file_path, "rb") as handle:
+            head = handle.read(_CRS_SCAN_BYTES)
+            if size > _CRS_SCAN_BYTES:
+                handle.seek(max(0, size - _CRS_SCAN_BYTES))
+                tail = handle.read(_CRS_SCAN_BYTES)
+            else:
+                tail = b""
+    except OSError:
+        return None
+    for chunk in (head, tail):
+        name = _extract_feature_collection_crs_hint(chunk.decode("utf-8", errors="replace"))
+        if name:
+            return _validated_crs_name(name)
+    return None
+
+
+def _validated_crs_name(name: str) -> Optional[str]:
+    """Return the CRS string if pyproj understands it, else ``None`` (with a
+    warning) so a bad ``crs`` member never breaks reading."""
+    from pyproj import CRS
+
+    try:
+        crs = CRS.from_user_input(name)
+    except Exception:
+        logger.warning("Ignoring unrecognised GeoJSON crs %r; assuming EPSG:4326", name)
+        return None
+    if crs.equals(CRS.from_epsg(4326), ignore_axis_order=True):
+        return None  # lon/lat is the default; no reprojection needed
+    return name
+
+
 def _extract_feature_collection_crs_hint(buffer: str) -> Optional[str]:
-    """
-    Try to read the CRS from the header of a FeatureCollection without loading the whole file.
-    Looks for a 'crs' object and returns its 'properties.name' if present.
-    """
+    """Find a GeoJSON ``"crs": {...}`` member in ``buffer`` (any position) and
+    return its ``properties.name``; ``None`` when absent or unparsable."""
     if not buffer:
         return None
 
-    idx = buffer.lower().find('"features"')
-    if idx == -1:
-        return None
+    lowered = buffer.lower()
+    start = 0
+    while True:
+        idx = lowered.find('"crs"', start)
+        if idx == -1:
+            return None
+        colon = buffer.find(":", idx + 5)
+        if colon == -1:
+            return None
+        brace = buffer.find("{", colon)
+        if brace == -1 or buffer[colon + 1:brace].strip():
+            start = idx + 5
+            continue
+        end = _matching_brace(buffer, brace)
+        if end == -1:
+            return None
+        try:
+            crs = json.loads(buffer[brace:end + 1])
+        except Exception:
+            start = idx + 5
+            continue
+        if isinstance(crs, dict):
+            props = crs.get("properties") or {}
+            name = props.get("name")
+            if isinstance(name, str):
+                return name
+        start = end
 
-    header = buffer[:idx]
-    first_brace = header.find("{")
-    if first_brace == -1:
-        return None
 
-    candidate = header[first_brace:]
-    candidate = candidate.rstrip(", \r\n\t")
-    candidate = candidate + "}"
-
-    try:
-        parsed = json.loads(candidate)
-    except Exception:
-        return None
-
-    crs = parsed.get("crs")
-    if isinstance(crs, dict):
-        props = crs.get("properties") or {}
-        name = props.get("name")
-        if isinstance(name, str):
-            return name
-
-    return None
+def _matching_brace(text: str, open_index: int) -> int:
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
