@@ -365,13 +365,20 @@ tile_result, mvt_result, pmtiles_path = starlet.build(
 Instead of generating every tile up to `zoom`, the pyramid is built zoom by
 zoom and only tiles whose encoded size is *estimated* to be at least
 `min_tile_bytes` are written and descended into; smaller tiles are left to
-on-the-fly generation. Zoom 0 is always written. The estimate is the tile's
-vertex count from the dataset histogram times the bytes-per-vertex observed
-on the tiles written at the previous zoom (90th percentile, extrapolated with
-the observed growth), so it adapts to the data and to `feature_capacity` /
-`tile_attributes`. It deliberately errs towards generating a few small tiles
-rather than missing large ones. `zoom` becomes an upper bound and defaults to
-`mvt.size_mode_max_zoom` (22) in this mode. Size-threshold mode needs the
+on-the-fly generation. Zoom 0 is always written. At each zoom, an upper
+bound (8 bytes per histogram vertex plus a per-feature allowance derived from
+the dataset statistics, using the bbox-coverage histogram) prunes tiles that
+cannot reach the threshold. Of the remaining tiles a dozen *probes* spread
+over the range of vertex counts are generated first; their measured sizes
+give a size-vs-vertices curve (log-log interpolation, scaled by
+`mvt.size_mode_safety`, default 2.5, because tiles with equal vertex counts
+differ about 2x in size) that decides which other tiles to generate. Below the histogram resolution (zoom 12 by default) every remaining
+candidate is generated and measured instead, so misses there are impossible.
+The estimator deliberately errs towards generating some small tiles rather
+than missing large ones: on the test datasets (US counties, 7M Chicago
+points) it missed no tile at or above the threshold. `zoom` becomes an upper
+bound and defaults to `mvt.size_mode_max_zoom` (22) in this mode.
+Size-threshold mode needs the
 pyramid engines (EPSG:4326 datasets; not the legacy map/reduce path).
 
 ```python

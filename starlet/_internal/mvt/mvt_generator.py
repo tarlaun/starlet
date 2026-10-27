@@ -146,12 +146,15 @@ class DatasetMVTGenerator:
         self.min_tile_bytes = int(
             min_tile_bytes if min_tile_bytes is not None else (config_value("mvt", "min_tile_bytes", 0) or 0)
         )
+        self.size_mode_safety = float(config_value("mvt", "size_mode_safety", self._SIZE_MODE_SAFETY) or self._SIZE_MODE_SAFETY)
         self.size_mode_stats: dict[int, dict[str, int]] = {}
 
         if self.num_zoom_levels <= 0:
             raise ValueError("num_zoom_levels must be positive")
         if self.threshold < 0:
             raise ValueError("threshold must be non-negative")
+        if self.size_mode_safety <= 0:
+            raise ValueError("mvt.size_mode_safety must be positive")
         if self.min_tile_bytes < 0:
             raise ValueError("min_tile_bytes must be non-negative")
         if self.output_format not in {"mvt", "pmtiles"}:
@@ -254,83 +257,202 @@ class DatasetMVTGenerator:
                     sizes[(x, int(stem))] = tile_file.stat().st_size
         return sizes
 
-    # Bytes-per-vertex grows from one zoom to the next (less simplification);
-    # the growth factor used before two zooms have been observed, and its
-    # clamp range, were calibrated on the states/provinces pyramid.
-    _SIZE_MODE_PRIOR_GROWTH = 3.0
-    _SIZE_MODE_GROWTH_RANGE = (1.0, 4.0)
-    _SIZE_MODE_RATIO_PERCENTILE = 90
+    # Size mode constants. The upper bound on a tile's encoded size assumes at
+    # most this many bytes per raw vertex (two zigzag varint deltas plus
+    # command overhead) and per feature (id, tags, geometry header).
+    _SIZE_MODE_BYTES_PER_VERTEX_BOUND = 8.0
+    _SIZE_MODE_FEATURE_OVERHEAD = 12.0
+    _SIZE_MODE_DEFAULT_ATTR_BYTES = 24.0
+    _SIZE_MODE_PROBES = 12
+    # Same-zoom estimates (log-log interpolation between the probes' sizes) are
+    # multiplied by this factor. Tiles with the same vertex count differ about
+    # 2x in encoded size (feature count, attributes), and a missed large tile
+    # costs more than a few pre-generated small ones.
+    _SIZE_MODE_SAFETY = 2.5
+    # Below the histogram resolution a child tile is assumed to be at most this
+    # many times larger than its (measured) parent; larger jumps only happen
+    # when a parent is heavily de-duplicated to dots and the child is not.
+    _SIZE_MODE_CHILD_GROWTH_BOUND = 16.0
+
+    def _size_mode_bytes_per_feature(self) -> float:
+        """Upper-bound estimate of the attribute payload of one feature, from
+        ``stats/attributes.json`` and the selected ``tile_attributes``."""
+        from starlet._internal.pmtiles.metadata import layer_fields
+
+        selected = self.tile_attributes if self.tile_attributes is not None else "all"
+        stats_path = self.dataset_dir / "stats" / "attributes.json"
+        total = self._SIZE_MODE_FEATURE_OVERHEAD
+        if isinstance(selected, str) and selected.strip().lower() == "none":
+            return total
+        fields = layer_fields(self.dataset_dir, selected, self.geom_col)
+        if not fields:
+            if isinstance(selected, (list, tuple, set)):
+                return total + len(selected) * self._SIZE_MODE_DEFAULT_ATTR_BYTES
+            return total + 4 * self._SIZE_MODE_DEFAULT_ATTR_BYTES
+        try:
+            import json
+
+            stats = {a.get("name"): (a.get("stats") or {}) for a in json.loads(stats_path.read_text()).get("attributes", [])}
+        except Exception:
+            stats = {}
+        for name, kind in fields.items():
+            field_stats = stats.get(name) or {}
+            if kind == "Number" or kind == "Boolean":
+                total += 2 + 8
+            else:
+                total += 2 + 1.5 * float(field_stats.get("avg_length") or self._SIZE_MODE_DEFAULT_ATTR_BYTES)
+        return total
+
+    def _size_mode_probes(self, candidates: list[tuple[int, int, int]], vertices_of: dict) -> list[tuple[int, int, int]]:
+        """Up to ``_SIZE_MODE_PROBES`` candidates spread over the range of
+        vertex counts (densest tiles saturate on feature_capacity and under-
+        state bytes per vertex; sparse ones carry proportionally more
+        attribute bytes), so the calibration sees both regimes."""
+        ranked = sorted((t for t in candidates if vertices_of[t] > 0), key=lambda t: vertices_of[t], reverse=True)
+        if len(ranked) <= self._SIZE_MODE_PROBES:
+            return ranked
+        positions = np.linspace(0, len(ranked) - 1, self._SIZE_MODE_PROBES)
+        picked: list[tuple[int, int, int]] = []
+        for pos in positions:
+            tile = ranked[int(round(pos))]
+            if tile not in picked:
+                picked.append(tile)
+        return picked
+
+    def _size_mode_curve(self, probes, vertices_of: dict, sizes: dict):
+        """Estimated encoded bytes as a function of a tile's vertex count,
+        interpolated (log-log) between the measured probes of the same zoom
+        and scaled by ``size_mode_safety`` (config ``mvt.size_mode_safety``,
+        default 2.5). Probes that produced no tile
+        count as one byte."""
+        points = sorted(
+            (vertices_of[t], max(1.0, float(sizes.get((t[1], t[2]), 0))))
+            for t in probes if vertices_of[t] > 0
+        )
+        if not points:
+            return lambda vertices: 0.0
+        log_v = np.log([v for v, _ in points])
+        log_b = np.log([b for _, b in points])
+        safety = self.size_mode_safety
+
+        def estimate(vertices: float) -> float:
+            if vertices <= 0:
+                return 0.0
+            return float(np.exp(np.interp(np.log(vertices), log_v, log_b))) * safety
+
+        return estimate
 
     def _run_size_mode(self, write_zoom, partitioner: PyramidPartitioner | None = None) -> None:
         """Generate the pyramid zoom by zoom, keeping only tiles whose encoded
         size is estimated to reach ``min_tile_bytes``.
 
-        Zoom 0 is always written. For zoom ``z`` the candidates are the
-        children (passing the histogram filter) of the tiles written at
-        ``z-1``. A child's size is estimated as ``vertices(child) * r_z`` where
-        ``vertices`` comes from the vertex histogram and ``r_z`` is the
-        bytes-per-vertex expected at zoom ``z``: the 90th percentile of the
-        actual bytes/vertex of the tiles written at ``z-1``, scaled by the
-        growth observed between the two previous zooms (tile simplification
-        weakens with depth, so bytes per raw vertex rise). The high percentile
-        deliberately over-estimates: pre-generating a few small tiles is
-        cheap, missing a large one is not. Tiles without any vertex (fully
-        inside a polygon) encode to a tiny fill and are never kept. Children
-        below the threshold are neither written nor descended into; they are
-        left to on-the-fly generation. The walk stops at the first zoom with
-        no kept tile or at the configured maximum zoom.
+        Tile size is not monotone in zoom: polygons saturate at low zoom
+        (simplification), points collapse to a few dots at low zoom and grow
+        for many levels. So two different estimates are used per tile:
 
-        ``write_zoom(z, tiles)`` must write the given tiles (non-empty ones)
-        to ``<outdir>/z/x/y.mvt``.
+        * an *upper bound* ``8 * vertices + bytes_per_feature * features``
+          (vertices from the vertex histogram, features from the bbox coverage
+          histogram) decides which tiles are worth *exploring*; a tile whose
+          bound is below the threshold has no descendant above it, so the walk
+          stays bounded at deep zooms. Below the histogram resolution the
+          parent cell's mass is assumed to halve per level (features clustered
+          along lines), keeping one covering feature;
+        * at zooms the histogram resolves, a *same-zoom calibration* decides
+          what is *written*: a few explored tiles spread over the range of
+          vertex counts are generated first (probes); their measured sizes
+          give a size-vs-vertices curve (log-log interpolation, times a
+          safety factor) that estimates every other candidate, and those at
+          or above the threshold are generated. Probes that turn out smaller
+          than the threshold are removed again;
+        * below the histogram resolution (zoom > log2(grid_size), 12 by
+          default) sizes cannot be estimated per tile, so every explored tile
+          is generated and measured, and those below the threshold are
+          removed. Only tiles measuring at least ``threshold / 16`` are
+          explored further (a child is assumed to be at most 16x its parent),
+          which keeps the walk from fanning out over empty descendants.
+
+        Zoom 0 is always written. Children below the threshold are left to
+        on-the-fly generation. ``write_zoom(z, tiles)`` must write the given
+        tiles (non-empty ones) to ``<outdir>/z/x/y.mvt``.
         """
         if partitioner is None:
             partitioner = self._build_partitioner()
         min_bytes = float(self.min_tile_bytes)
+        bytes_per_feature = self._size_mode_bytes_per_feature()
+        hist_zoom = int(round(math.log2(partitioner.prefix_histogram.shape[0]))) if partitioner.prefix_histogram is not None else 0
+        has_coverage = partitioner.coverage_prefix is not None
+
+        def passes(z: int, x: int, y: int) -> bool:
+            return partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(z, x, y), z, x, y)
+
+        def upper_bound(z: int, x: int, y: int) -> float:
+            vertices = partitioner.histogram_value(z, x, y)
+            features = partitioner.coverage_value(z, x, y) if has_coverage else vertices
+            if z > hist_zoom:
+                # histogram_value() spreads the parent cell uniformly (/4 per
+                # level); clustered data can put half of it in one child, so
+                # the bound assumes /2 per level. Coverage is inherited from
+                # the parent cell: spread it the same way but keep room for a
+                # polygon covering every descendant.
+                levels = z - hist_zoom
+                vertices = vertices * float(4 ** levels) / float(2 ** levels)
+                features = features / float(2 ** levels) + 1.0
+            return self._SIZE_MODE_BYTES_PER_VERTEX_BOUND * vertices + bytes_per_feature * features
+
         root = (0, 0, 0)
-        root_ok = partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(*root), *root)
+        root_ok = passes(*root)
         self.size_mode_stats = {}
         write_zoom(0, [root] if root_ok else [])
-        self.size_mode_stats[0] = {"candidates": 1, "kept": 1 if root_ok else 0}
+        self.size_mode_stats[0] = {"candidates": 1, "probes": 0, "kept": 1 if root_ok else 0}
+        frontier = [root] if root_ok else []
+        logger.info(
+            "DatasetMVTGenerator[size-mode] min_tile_bytes=%d, bound uses %.0f bytes/feature",
+            self.min_tile_bytes, bytes_per_feature,
+        )
 
-        ratio_history: list[float] = []
         for z in range(1, partitioner.max_zoom + 1):
-            parents = self._written_tile_sizes(z - 1)
-            ratios = []
-            for (px, py), size in parents.items():
-                hist = partitioner.histogram_value(z - 1, px, py)
-                if hist > 0:
-                    ratios.append(size / hist)
-            if not ratios:
-                logger.info("DatasetMVTGenerator[size-mode] z=%d: no tiles with vertices at z=%d, stopping", z, z - 1)
-                break
-            ratio = float(np.percentile(ratios, self._SIZE_MODE_RATIO_PERCENTILE))
-            if ratio_history:
-                growth = ratio / max(ratio_history[-1], 1e-12)
-                low, high = self._SIZE_MODE_GROWTH_RANGE
-                growth = min(max(growth, low), high)
-            else:
-                growth = self._SIZE_MODE_PRIOR_GROWTH
-            ratio_history.append(ratio)
-            bytes_per_vertex = ratio * growth
-
-            kept: list[tuple[int, int, int]] = []
-            candidates = 0
-            for (px, py), _parent_bytes in parents.items():
+            candidates: list[tuple[int, int, int]] = []
+            for (_, px, py) in frontier:
                 for cx, cy in ((2 * px, 2 * py), (2 * px + 1, 2 * py), (2 * px, 2 * py + 1), (2 * px + 1, 2 * py + 1)):
-                    if not partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(z, cx, cy), z, cx, cy):
-                        continue
-                    candidates += 1
-                    estimate = partitioner.histogram_value(z, cx, cy) * bytes_per_vertex
-                    if estimate >= min_bytes:
-                        kept.append((z, cx, cy))
-            self.size_mode_stats[z] = {"candidates": candidates, "kept": len(kept)}
-            logger.info(
-                "DatasetMVTGenerator[size-mode] z=%d candidates=%d kept=%d (min_tile_bytes=%d, est. bytes/vertex=%.3f)",
-                z, candidates, len(kept), self.min_tile_bytes, bytes_per_vertex,
-            )
-            if not kept:
+                    if passes(z, cx, cy) and upper_bound(z, cx, cy) >= min_bytes:
+                        candidates.append((z, cx, cy))
+            if not candidates:
+                logger.info("DatasetMVTGenerator[size-mode] z=%d: no tile can reach %d bytes, stopping", z, self.min_tile_bytes)
                 break
-            write_zoom(z, kept)
+
+            vertices_of = {t: partitioner.histogram_value(*t) for t in candidates}
+            if z > hist_zoom:
+                # Below the histogram resolution every explored tile is
+                # generated and measured.
+                probes = list(candidates)
+                ratio = math.nan
+            else:
+                probes = self._size_mode_probes(candidates, vertices_of)
+            write_zoom(z, probes)
+            sizes = self._written_tile_sizes(z)
+            probe_set = set(probes)
+            if z > hist_zoom:
+                kept = [t for t in candidates if sizes.get((t[1], t[2]), 0) >= min_bytes]
+            else:
+                estimate = self._size_mode_curve(probes, vertices_of, sizes)
+                ratio = estimate(1.0)
+                kept = [t for t in candidates if t not in probe_set and estimate(vertices_of[t]) >= min_bytes]
+                kept += [t for t in probes if sizes.get((t[1], t[2]), 0) >= min_bytes]
+            kept_set = set(kept)
+            write_zoom(z, [t for t in kept if t not in probe_set])
+            for (_, x, y) in probes:
+                if (z, x, y) not in kept_set:
+                    (self.outdir / str(z) / str(x) / f"{y}.mvt").unlink(missing_ok=True)
+            self.size_mode_stats[z] = {"candidates": len(candidates), "probes": len(probes), "kept": len(kept)}
+            logger.info(
+                "DatasetMVTGenerator[size-mode] z=%d explored=%d probes=%d kept=%d (est. bytes for 1 vertex=%.1f)",
+                z, len(candidates), len(probes), len(kept), ratio,
+            )
+            if z > hist_zoom:
+                floor = min_bytes / self._SIZE_MODE_CHILD_GROWTH_BOUND
+                frontier = [t for t in candidates if sizes.get((t[1], t[2]), 0) >= floor]
+            else:
+                frontier = candidates
 
     def _finish(self) -> DatasetMVTGenerationResult:
         tile_counts_by_zoom = _discover_tile_counts_by_zoom(self.outdir)

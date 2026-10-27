@@ -71,6 +71,9 @@ threshold = 50000
 # Size-threshold mode: 0 (default) builds the fixed pyramid up to `zoom`;
 # e.g. "50kb" pre-generates only tiles estimated to be at least that large,
 # at any zoom up to `size_mode_max_zoom` (22) or an explicit `zoom`.
+# `size_mode_safety` (2.5) scales the size estimates: raise it to miss fewer
+# large tiles at the cost of pre-generating more small ones, lower it for the
+# opposite.
 min_tile_bytes = 0
 pmtiles = false
 

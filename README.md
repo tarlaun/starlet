@@ -100,13 +100,15 @@ A fixed `--zoom` either stops too early for dense areas or wastes time on
 thousands of tiny tiles elsewhere. `--min-tile-bytes` turns the pyramid into a
 size-threshold build: zoom 0 is always written, then zoom by zoom only the
 tiles whose encoded size is estimated to reach the threshold are generated
-and descended into. The estimate uses the dataset's vertex histogram,
-calibrated against the sizes of the tiles actually written at the previous
+and descended into. Tiles that cannot reach the threshold are pruned with a
+bound from the dataset's vertex and coverage histograms; the rest are
+estimated from a handful of probe tiles generated and measured at the same
 zoom (so it adapts to the data and to `--feature-capacity` /
-`--tile-attributes`). Everything below the threshold is cheap to render and is
-left to the on-the-fly server. `--zoom` still caps the depth (default 22 in
-this mode). Sizes are uncompressed MVT bytes and an estimate: expect a few
-small tiles to be pre-generated too, rarely the other way round.
+`--tile-attributes`), and below the histogram resolution every candidate is
+simply generated and measured. Everything below the threshold is cheap to
+render and is left to the on-the-fly server. `--zoom` still caps the depth
+(default 22 in this mode). Sizes are uncompressed MVT bytes; the estimate
+errs towards pre-generating some small tiles rather than missing large ones.
 
 ```bash
 # Pre-generate every tile that would be ~50 KB or more, at any zoom
