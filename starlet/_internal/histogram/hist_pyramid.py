@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
+from shapely import bounds as shapely_bounds
 from shapely import from_wkb, get_coordinates
 from pyproj import Transformer
 
@@ -63,14 +64,25 @@ def _accumulate_vertices_hist(
     geom_col: str,
     bbox_out,
     transformer,
+    coverage_diff: np.ndarray | None = None,
 ):
-    """Transform vertices in batches and increment histogram cells in place."""
+    """Transform vertices in batches and increment histogram cells in place.
+
+    When ``coverage_diff`` (a ``(grid+1, grid+1)`` 2D difference array) is
+    given, every geometry's bounding box is also recorded so that the 2D
+    prefix sum of ``coverage_diff`` gives, per cell, the number of feature
+    bounding boxes covering it. The vertex histogram alone is zero inside a
+    large polygon, which made tiles fully inside a polygon look empty.
+    """
     geoms = from_wkb(table[geom_col].to_numpy(zero_copy_only=False))
 
     minx, miny, maxx, maxy = bbox_out
     inv_w = 1.0 / (maxx - minx)
     inv_h = 1.0 / (maxy - miny)
     grid_size = histogram.shape[0]
+
+    if coverage_diff is not None:
+        _accumulate_coverage(geoms, coverage_diff, bbox_out, transformer)
 
     coords = get_coordinates(geoms)
     if coords.size == 0:
@@ -105,6 +117,69 @@ def _accumulate_vertices_hist(
     ix = np.clip(ix, 0, grid_size - 1)
     iy = np.clip(iy, 0, grid_size - 1)
     np.add.at(histogram, (grid_size - 1 - iy, ix), 1)
+
+
+def _accumulate_coverage(geoms, coverage_diff: np.ndarray, bbox_out, transformer) -> None:
+    """Add every geometry's (transformed) bounding box to a 2D difference array.
+
+    ``coverage_diff`` has shape ``(grid+1, grid+1)``; ``coverage_diff[:-1, :-1]``
+    cumulated along both axes is the per-cell count of covering bounding boxes.
+    Rows follow the histogram convention (row 0 = top / max y).
+    """
+    bounds = shapely_bounds(geoms)
+    if bounds.size == 0:
+        return
+    bounds = np.asarray(bounds, dtype=np.float64)
+    finite = np.all(np.isfinite(bounds), axis=1)
+    if not np.any(finite):
+        return
+    bounds = bounds[finite]
+
+    # Transform the four corners of each bbox; the transformed bbox is the
+    # envelope of the corners (exact for affine / axis-aligned transforms and
+    # conservative enough for the Web Mercator case starlet uses).
+    xs = np.concatenate([bounds[:, 0], bounds[:, 2], bounds[:, 0], bounds[:, 2]])
+    ys = np.concatenate([bounds[:, 1], bounds[:, 1], bounds[:, 3], bounds[:, 3]])
+    tx, ty = transformer.transform(xs, ys)
+    tx = np.asarray(tx, dtype=np.float64).reshape(4, -1)
+    ty = np.asarray(ty, dtype=np.float64).reshape(4, -1)
+    with np.errstate(invalid="ignore"):
+        bminx = np.nanmin(tx, axis=0)
+        bmaxx = np.nanmax(tx, axis=0)
+        bminy = np.nanmin(ty, axis=0)
+        bmaxy = np.nanmax(ty, axis=0)
+    ok = np.isfinite(bminx) & np.isfinite(bmaxx) & np.isfinite(bminy) & np.isfinite(bmaxy)
+    if not np.any(ok):
+        return
+    bminx, bmaxx, bminy, bmaxy = bminx[ok], bmaxx[ok], bminy[ok], bmaxy[ok]
+
+    minx, miny, maxx, maxy = bbox_out
+    grid_size = coverage_diff.shape[0] - 1
+    inv_w = grid_size / (maxx - minx)
+    inv_h = grid_size / (maxy - miny)
+    # Drop boxes entirely outside the world extent.
+    inside = (bmaxx >= minx) & (bminx <= maxx) & (bmaxy >= miny) & (bminy <= maxy)
+    if not np.any(inside):
+        return
+    bminx, bmaxx, bminy, bmaxy = bminx[inside], bmaxx[inside], bminy[inside], bmaxy[inside]
+
+    ix0 = np.clip(np.floor((bminx - minx) * inv_w).astype(np.int64), 0, grid_size - 1)
+    ix1 = np.clip(np.floor((bmaxx - minx) * inv_w).astype(np.int64), 0, grid_size - 1)
+    iy_lo = np.clip(np.floor((bminy - miny) * inv_h).astype(np.int64), 0, grid_size - 1)
+    iy_hi = np.clip(np.floor((bmaxy - miny) * inv_h).astype(np.int64), 0, grid_size - 1)
+    # Flip y so row 0 is the top of the world, like the vertex histogram.
+    r0 = grid_size - 1 - iy_hi
+    r1 = grid_size - 1 - iy_lo
+
+    np.add.at(coverage_diff, (r0, ix0), 1)
+    np.add.at(coverage_diff, (r0, ix1 + 1), -1)
+    np.add.at(coverage_diff, (r1 + 1, ix0), -1)
+    np.add.at(coverage_diff, (r1 + 1, ix1 + 1), 1)
+
+
+def coverage_from_diff(coverage_diff: np.ndarray) -> np.ndarray:
+    """Per-cell bounding-box coverage counts from a 2D difference array."""
+    return coverage_diff.cumsum(axis=0).cumsum(axis=1)[:-1, :-1]
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +226,7 @@ def _process_split_group(
     dtype = np.dtype(cfg.dtype)
     bbox = GLOBAL_BBOX
     base = np.zeros((cfg.grid_size, cfg.grid_size), dtype=dtype)
+    coverage_diff = np.zeros((cfg.grid_size + 1, cfg.grid_size + 1), dtype=np.int64)
     transformers = {}
 
     for split in splits:
@@ -166,16 +242,25 @@ def _process_split_group(
                 geom_col,
                 bbox,
                 transformer,
+                coverage_diff=coverage_diff,
             )
 
-    return base
+    return base, coverage_diff
 
 
 # ---------------------------------------------------------------------------
 # GLOBAL SUM AND PREFIX SUM
 # ---------------------------------------------------------------------------
 
-def _sum_all_tiles(tile_hists: List[np.ndarray], outdir: Path, dtype="float64") -> Path:
+COVERAGE_FILENAME = "global_cover.npy"
+
+
+def _sum_all_tiles(
+    tile_hists: List[np.ndarray],
+    outdir: Path,
+    dtype="float64",
+    coverage_diffs: Optional[List[np.ndarray]] = None,
+) -> Path:
 
     if not tile_hists:
         raise RuntimeError("No tile histograms generated")
@@ -189,6 +274,34 @@ def _sum_all_tiles(tile_hists: List[np.ndarray], outdir: Path, dtype="float64") 
                 f"Tile histogram has shape {hist.shape}, expected {total.shape}"
             )
         total += hist
+
+    if coverage_diffs:
+        diff_total = np.zeros_like(coverage_diffs[0], dtype=np.int64)
+        for diff in coverage_diffs:
+            diff_total += diff
+        coverage = coverage_from_diff(diff_total)
+        # Counts of covering feature bboxes per cell; uint32 keeps the file at
+        # half the size of the float64 vertex histogram. The prefix sum is
+        # rebuilt on load (HistogramLoader).
+        coverage = np.clip(coverage, 0, np.iinfo(np.uint32).max).astype(np.uint32)
+        cover_path = outdir / COVERAGE_FILENAME
+        np.save(cover_path, coverage, allow_pickle=False)
+        with open(outdir / "global_cover.json", "w") as f:
+            json.dump(
+                {
+                    "filename": COVERAGE_FILENAME,
+                    "dtype": str(coverage.dtype),
+                    "grid_size": int(coverage.shape[0]),
+                    "shape": list(coverage.shape),
+                    "crs": "EPSG:3857",
+                    "bbox": list(GLOBAL_BBOX),
+                    "desc": "per-cell count of feature bounding boxes covering the cell",
+                    "nonzero": int(np.count_nonzero(coverage)),
+                },
+                f,
+                indent=2,
+            )
+        logger.info("Wrote bbox coverage histogram: %s", cover_path)
 
     global_path = outdir / "global.npy"
     np.save(global_path, total, allow_pickle=False)
@@ -279,7 +392,10 @@ def build_histograms_for_dir(
             for split_group in split_groups
         }
 
+        coverage_outputs = []
         for f in as_completed(futures):
-            tile_outputs.append(f.result())
+            hist, coverage_diff = f.result()
+            tile_outputs.append(hist)
+            coverage_outputs.append(coverage_diff)
 
-    _sum_all_tiles(tile_outputs, outdir_p, dtype=dtype)
+    _sum_all_tiles(tile_outputs, outdir_p, dtype=dtype, coverage_diffs=coverage_outputs)

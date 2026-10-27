@@ -201,3 +201,63 @@ def test_out_of_bounds_geometry_returns_no_tiles():
 def test_rejects_invalid_zoom_level_counts(num_zoom_levels):
     with pytest.raises(ValueError):
         PyramidPartitioner(WORLD, num_zoom_levels=num_zoom_levels)
+
+
+def _prefix(raw):
+    return np.asarray(raw, dtype=np.float64).cumsum(axis=0).cumsum(axis=1)
+
+
+def test_tile_inside_polygon_passes_with_coverage_but_not_vertices_alone():
+    # 4x4 histogram (hist_zoom=2). A square polygon whose four vertices sit in
+    # the corner cells (0,0), (0,3), (3,0), (3,3) covers every cell, but the
+    # vertex histogram is zero in the interior cells.
+    vertices = np.zeros((4, 4))
+    for r, c in ((0, 0), (0, 3), (3, 0), (3, 3)):
+        vertices[r, c] = 1
+    coverage = np.ones((4, 4))
+
+    vertex_only = PyramidPartitioner(WORLD, num_zoom_levels=3, prefix_histogram=_prefix(vertices))
+    with_cover = PyramidPartitioner(
+        WORLD, num_zoom_levels=3, prefix_histogram=_prefix(vertices), coverage_prefix=_prefix(coverage)
+    )
+
+    interior = PyramidPartitioner.encode_tile_id(2, 1, 1)
+    assert vertex_only._tile_passes_filter(interior, 2, 1, 1) is False
+    assert with_cover._tile_passes_filter(interior, 2, 1, 1) is True
+    assert with_cover.coverage_value(2, 1, 1) == 1.0
+    assert with_cover.histogram_value(2, 1, 1) == 0.0
+
+
+def test_coverage_is_inherited_below_histogram_resolution():
+    coverage = np.zeros((4, 4))
+    coverage[2, 1] = 3  # only this cell is covered
+    partitioner = PyramidPartitioner(WORLD, num_zoom_levels=5, coverage_prefix=_prefix(coverage))
+
+    # zoom 4 children of hist cell (x=1, y=2) inherit the full value ...
+    assert partitioner.coverage_value(4, 4, 8) == 3.0
+    assert partitioner.coverage_value(4, 7, 11) == 3.0
+    # ... and tiles outside it stay empty.
+    assert partitioner.coverage_value(4, 0, 0) == 0.0
+    assert partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(4, 0, 0), 4, 0, 0) is False
+    assert partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(4, 5, 9), 4, 5, 9) is True
+
+
+def test_threshold_applies_to_max_of_vertices_and_coverage():
+    vertices = np.zeros((4, 4))
+    vertices[0, 0] = 10
+    coverage = np.zeros((4, 4))
+    coverage[3, 3] = 2
+    partitioner = PyramidPartitioner(
+        WORLD, num_zoom_levels=3, prefix_histogram=_prefix(vertices),
+        coverage_prefix=_prefix(coverage), size_threshold=5,
+    )
+    assert partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(2, 0, 0), 2, 0, 0) is True
+    assert partitioner._tile_passes_filter(PyramidPartitioner.encode_tile_id(2, 3, 3), 2, 3, 3) is False
+
+
+def test_coverage_shape_must_match_histogram():
+    with pytest.raises(ValueError):
+        PyramidPartitioner(
+            WORLD, num_zoom_levels=2,
+            prefix_histogram=_prefix(np.zeros((4, 4))), coverage_prefix=_prefix(np.zeros((8, 8))),
+        )

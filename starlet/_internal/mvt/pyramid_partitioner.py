@@ -1,7 +1,6 @@
 """Minimal pyramid tile partitioner for MVT-style tile assignment.
 
-This helper is intentionally not wired into the current MVT pipeline yet.  It
-maps geometry bounds in an arbitrary projected space to all overlapping tiles
+It maps geometry bounds in an arbitrary projected space to all overlapping tiles
 from the deepest configured zoom back to zoom 0.
 """
 
@@ -58,7 +57,12 @@ class PyramidPartitioner:
         count is lower than or equal to ``size_threshold`` are filtered out.
     size_threshold:
         Strict threshold for histogram filtering.  A tile is returned only when
-        ``histogram_value > size_threshold``.
+        ``max(histogram_value, coverage_value) > size_threshold``.
+    coverage_prefix:
+        Optional 2D prefix sum of the bounding-box coverage histogram (per
+        cell: number of feature bounding boxes covering it).  Without it the
+        vertex histogram alone decides, and tiles that lie fully inside a
+        polygon (no vertices, but covered) are wrongly treated as empty.
     buffer:
         Ratio of tile size by which geometry bounds are expanded at each level.
         For example, ``0.01`` expands by 1% of the tile width/height for the
@@ -76,6 +80,7 @@ class PyramidPartitioner:
         size_threshold: float = 0.0,
         buffer: float = 0.0,
         cache_size: int = 65_536,
+        coverage_prefix: Optional[np.ndarray] = None,
     ) -> None:
         if num_zoom_levels <= 0:
             raise ValueError("num_zoom_levels must be positive")
@@ -92,6 +97,13 @@ class PyramidPartitioner:
         self.num_zoom_levels = int(num_zoom_levels)
         self.max_zoom = self.num_zoom_levels - 1
         self.prefix_histogram = self._validate_prefix(prefix_histogram)
+        self.coverage_prefix = self._validate_prefix(coverage_prefix)
+        if (
+            self.coverage_prefix is not None
+            and self.prefix_histogram is not None
+            and self.coverage_prefix.shape != self.prefix_histogram.shape
+        ):
+            raise ValueError("coverage_prefix must have the same shape as prefix_histogram")
         self.size_threshold = float(size_threshold)
         if self.prefix_histogram is not None and self.size_threshold > 0:
             self.max_zoom = min(
@@ -278,9 +290,8 @@ class PyramidPartitioner:
             self._accepted_cache.move_to_end(tile_id)
             return True
 
-        if self.prefix_histogram is not None:
-            value = self._histogram_value(z, x, y)
-            if value <= self.size_threshold:
+        if self.prefix_histogram is not None or self.coverage_prefix is not None:
+            if self.estimated_density(z, x, y) <= self.size_threshold:
                 return False
 
         if self.cache_size > 0:
@@ -290,14 +301,41 @@ class PyramidPartitioner:
                 self._accepted_cache.popitem(last=False)
         return True
 
+    def estimated_density(self, z: int, x: int, y: int) -> float:
+        """Value compared against ``size_threshold``: the larger of the
+        estimated vertex count and the bounding-box coverage of the tile."""
+        value = 0.0
+        if self.prefix_histogram is not None:
+            value = self._histogram_value(z, x, y)
+        if self.coverage_prefix is not None:
+            value = max(value, self.coverage_value(z, x, y))
+        return value
+
+    def histogram_value(self, z: int, x: int, y: int) -> float:
+        """Estimated vertex count of a tile (``inf`` without a histogram)."""
+        return self._histogram_value(z, x, y)
+
+    def coverage_value(self, z: int, x: int, y: int) -> float:
+        """Bounding-box coverage of a tile: sum over its cells of the number of
+        feature bboxes covering each cell. Zero means no feature can touch the
+        tile. Below the histogram resolution the parent cell's value is
+        inherited (coverage is not divisible like vertex counts)."""
+        prefix = self.coverage_prefix
+        if prefix is None:
+            return 0.0
+        return self._prefix_value(prefix, z, x, y, divide=False)
+
     def _histogram_value(self, z: int, x: int, y: int) -> float:
         prefix = self.prefix_histogram
         if prefix is None:
             return math.inf
+        return self._prefix_value(prefix, z, x, y, divide=True)
 
+    @classmethod
+    def _prefix_value(cls, prefix: np.ndarray, z: int, x: int, y: int, *, divide: bool) -> float:
         hist_zoom = int(round(math.log2(prefix.shape[0])))
         if z == hist_zoom:
-            return self._prefix_sum(prefix, x, y, x, y)
+            return cls._prefix_sum(prefix, x, y, x, y)
 
         if z < hist_zoom:
             scale = 1 << (hist_zoom - z)
@@ -305,12 +343,15 @@ class PyramidPartitioner:
             y0 = y * scale
             x1 = (x + 1) * scale - 1
             y1 = (y + 1) * scale - 1
-            return self._prefix_sum(prefix, x0, y0, x1, y1)
+            return cls._prefix_sum(prefix, x0, y0, x1, y1)
 
         scale = 1 << (z - hist_zoom)
         parent_x = x // scale
         parent_y = y // scale
-        return self._prefix_sum(prefix, parent_x, parent_y, parent_x, parent_y) / (scale * scale)
+        value = cls._prefix_sum(prefix, parent_x, parent_y, parent_x, parent_y)
+        if divide:
+            return value / (scale * scale)
+        return value
 
     @staticmethod
     def _prefix_sum(prefix: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> float:
