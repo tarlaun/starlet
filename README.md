@@ -26,6 +26,13 @@ This installs the `starlet` command-line tool. Check it:
 starlet --version
 ```
 
+For the optional Rust acceleration (on-the-fly tiles and pyramids 5–30×
+faster; prebuilt wheels for Linux, macOS and Windows, any Python ≥ 3.10):
+
+```bash
+pip install "starlet[rust]"
+```
+
 For local development and testing, install the project with dev dependencies:
 
 ```bash
@@ -205,9 +212,11 @@ dataset even without pre-generating every zoom.
 Tile generation is vectorised (numpy + shapely arrays, a numpy MVT encoder,
 a bounded cache of decoded Parquet row groups), so the pure-Python install
 serves on-the-fly tiles in milliseconds at high zoom and builds pyramids
-without intermediate files. An optional Rust core (`starlet_core`, in
-`rust/starlet-core`) produces the same tiles another 5–30× faster and is used
-automatically when installed. See
+without intermediate files. An optional Rust core (`starlet_core`, the
+`starlet-core` package on PyPI, source in `rust/starlet-core`) produces the
+same tiles another 5–30× faster and is used automatically when installed
+(`pip install "starlet[rust]"`; set `STARLET_ENGINE=rust` to also use it for
+batch pyramids). See
 [DEVELOPMENT.md](DEVELOPMENT.md#rust-acceleration-core-optional).
 
 ## Configuration

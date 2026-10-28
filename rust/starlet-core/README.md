@@ -11,7 +11,17 @@ at import time and uses it for:
 
 Without it, starlet runs its pure-Python pipeline unchanged.
 
-## Build
+## Install
+
+Prebuilt abi3 wheels (Linux x86_64/aarch64, macOS arm64/x86_64, Windows x64;
+any CPython >= 3.10) are on PyPI as `starlet-core`:
+
+```bash
+pip install "starlet[rust]"     # starlet + starlet-core
+pip install starlet-core        # just the extension
+```
+
+## Build from source
 
 ```bash
 # Rust toolchain (once): https://rustup.rs

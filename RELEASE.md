@@ -264,3 +264,28 @@ Total time: ~15-20 minutes
 - **GitHub Actions logs**: https://github.com/ucr-bdlab/starlet/actions
 - **PyPI project**: https://pypi.org/project/starlet/
 - **Issues**: https://github.com/ucr-bdlab/starlet/issues
+
+## Releasing `starlet-core` (the optional Rust extension)
+
+The Rust extension is a **separate PyPI package**, `starlet-core`, built from
+`rust/starlet-core/` by `.github/workflows/publish-core.yml`. `pip install
+starlet[rust]` pulls it in; starlet itself never requires it, so a Rust build
+problem can never block a starlet release.
+
+1. Bump `version` in **both** `rust/starlet-core/Cargo.toml` and
+   `rust/starlet-core/pyproject.toml` (keep them identical), run
+   `cargo generate-lockfile --offline` there, commit.
+2. Optionally dry-run the build matrix without publishing:
+   `gh workflow run publish-core.yml -R ucr-bdlab/starlet` (the wheels are
+   kept as workflow artifacts).
+3. Tag and push: `git tag core-vX.Y.Z && git push ucr-bdlab core-vX.Y.Z`.
+   The workflow runs `cargo test`, builds abi3 wheels (one per platform works
+   for every CPython >= 3.10) for Linux x86_64/aarch64, macOS arm64/x86_64 and
+   Windows x64 plus an sdist, installs each wheel next to starlet and runs the
+   Rust-vs-Python parity tests, and publishes to PyPI via trusted publishing.
+4. If starlet's minimum changed, bump `starlet-core>=X.Y.Z` in the `rust`
+   extra of `pyproject.toml`.
+
+One-time setup on PyPI: create the `starlet-core` project with a *pending
+trusted publisher* for repository `ucr-bdlab/starlet`, workflow
+`publish-core.yml`, environment `pypi`.

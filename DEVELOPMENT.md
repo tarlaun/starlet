@@ -169,7 +169,8 @@ starlet detects it at import (`starlet/_internal/mvt/rust_engine.py`) and
 uses it for on-the-fly tiles (`generate_single_mvt_tile`, hence `starlet
 serve`); batch pyramid generation switches to it with `STARLET_ENGINE=rust`.
 Everything falls back to Python when it is absent — pure-Python installs are
-unaffected.
+unaffected. Users get it with `pip install "starlet[rust]"` (prebuilt abi3
+wheels from the `starlet-core` PyPI package); from source:
 
 ```bash
 # once: Rust toolchain from https://rustup.rs, then
@@ -209,6 +210,14 @@ ship in the wheel.
    block the PyPI publish.)
 4. **publish** — uploads to PyPI via trusted publishing (OIDC, `pypi`
    environment).
+
+`.github/workflows/publish-core.yml` releases the Rust extension as the
+separate PyPI package `starlet-core` on every `core-vX.Y.Z` tag push (and
+builds without publishing on `workflow_dispatch`): `cargo test`, abi3 wheels
+for Linux x86_64/aarch64, macOS arm64/x86_64 and Windows x64 via
+`PyO3/maturin-action`, an sdist, a parity-test job that installs each wheel
+next to starlet, then trusted publishing. See
+[RELEASE.md](RELEASE.md#releasing-starlet-core-the-optional-rust-extension).
 
 ## Cutting a release
 

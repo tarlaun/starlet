@@ -4,14 +4,19 @@ build-backend = "maturin"
 
 [project]
 name = "starlet-core"
-version = "0.1.0"
+version = "0.5.0"
 description = "Rust acceleration core for starlet (optional): on-the-fly vector tiles and parallel pyramid generation"
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ucr-bdlab/starlet"
+Repository = "https://github.com/ucr-bdlab/starlet/tree/master/rust/starlet-core"
 
 [tool.maturin]
 features = ["extension-module"]

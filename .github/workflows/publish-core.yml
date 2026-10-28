@@ -1,0 +1,149 @@
+name: Publish starlet-core to PyPI
+
+# Builds abi3 wheels of the optional Rust extension (rust/starlet-core) for
+# every supported platform and publishes them as the separate PyPI package
+# `starlet-core`, which `pip install starlet[rust]` pulls in.
+#
+# - push of a tag `core-vX.Y.Z` (X.Y.Z must match rust/starlet-core/Cargo.toml):
+#   build, test, publish to PyPI (trusted publishing, environment `pypi`).
+# - workflow_dispatch: build and test only; wheels are kept as artifacts so a
+#   change to the crate can be checked on every platform without releasing.
+
+on:
+  push:
+    tags:
+      - "core-v*.*.*"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: rust/starlet-core
+
+jobs:
+  cargo-test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/starlet-core
+      - run: cargo test --release
+
+  wheels:
+    name: wheel ${{ matrix.name }}
+    needs: cargo-test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,  os: ubuntu-latest,   target: x86_64,  manylinux: auto }
+          - { name: linux-aarch64, os: ubuntu-latest,   target: aarch64, manylinux: "2_28" }
+          - { name: macos-arm64,   os: macos-14,        target: aarch64 }
+          - { name: macos-x86_64,  os: macos-13,        target: x86_64 }
+          - { name: windows-x64,   os: windows-latest,  target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: rust/starlet-core
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --out dist
+          sccache: "true"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: rust/starlet-core/dist
+
+  sdist:
+    name: sdist
+    needs: cargo-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: rust/starlet-core
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: rust/starlet-core/dist
+
+  test-wheels:
+    # Install the wheel built for the runner next to starlet from the checkout
+    # and run the Rust-vs-Python parity tests, plus a size-mode build on the
+    # Rust engine.
+    name: test ${{ matrix.name }} (py${{ matrix.python }})
+    needs: wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest,  python: "3.10" }
+          - { name: linux-x86_64, os: ubuntu-latest,  python: "3.13" }
+          - { name: macos-arm64,  os: macos-14,       python: "3.12" }
+          - { name: windows-x64,  os: windows-latest, python: "3.12" }
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: dist
+      - name: Install starlet and the wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest pytest-cov pytest-mock
+          pip install --no-index --find-links dist starlet-core
+          python -c "import starlet_core; print('starlet_core', starlet_core.__version__, starlet_core.num_threads(), 'threads')"
+      - name: Parity tests
+        shell: bash
+        run: pytest tests/test_mvt/test_rust_engine.py tests/test_mvt/test_size_mode.py -q --no-cov -p no:cacheprovider
+      - name: Rust-engine size-mode build (smoke test)
+        shell: bash
+        env:
+          STARLET_ENGINE: rust
+        run: python .github/scripts/smoke_rust_size_mode.py
+
+  publish:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/core-v')
+    needs: [test-wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Check the tag matches the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#core-v}"
+          ls dist
+          test -n "$(ls dist/starlet_core-${tag}-*.whl 2>/dev/null)" || { echo "no wheel for version $tag in dist/"; exit 1; }
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

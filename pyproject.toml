@@ -44,6 +44,11 @@ include = ["starlet*"]
 "starlet._internal.server" = ["templates/*.html", "*.html"]
 
 [project.optional-dependencies]
+# Rust acceleration (starlet_core): on-the-fly tiles and STARLET_ENGINE=rust
+# pyramids 5-30x faster. Prebuilt abi3 wheels for Linux/macOS/Windows.
+rust = [
+    "starlet-core>=0.5.0",
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
