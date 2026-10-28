@@ -40,7 +40,7 @@ use rayon::prelude::*;
 use crate::geom::mercator::{lonlat_to_merc, tile_width, WORLD_MAX, WORLD_MIN};
 use crate::geom::{merc_bbox_to_lonlat, GeomKind, Geometry, TileId, TileTransform};
 use crate::mvt::{LayerBuilder, TileWriter};
-use crate::pq::{arrow_value, wkb_at, BBOX_COLS};
+use crate::pq::{arrow_values, wkb_at, BBOX_COLS};
 use crate::tiler::{place, priority, sub_pixel, tile_feature, Dataset, DotBuffer, Params, TileFeature, LAYER_NAME};
 
 const BATCH_SIZE: usize = 8192;
@@ -410,15 +410,12 @@ impl Dataset {
                         g.from_lonlat_to_merc();
                         g
                     });
-                    let attrs: Vec<(&str, crate::mvt::Value)> = part
-                        .attr_cols
-                        .iter()
-                        .filter(|name| p.attrs.allows(name))
-                        .filter_map(|name| {
-                            let ci = b.schema().index_of(name).ok()?;
-                            arrow_value(b.column(ci), ri).map(|v| (name.as_str(), v))
-                        })
-                        .collect();
+                    let mut attrs: Vec<(String, crate::mvt::Value)> = Vec::with_capacity(part.attr_cols.len());
+                    for name in part.attr_cols.iter().filter(|name| p.attrs.allows(name)) {
+                        if let Ok(ci) = b.schema().index_of(name) {
+                            arrow_values(b.column(ci), ri, name, &mut attrs);
+                        }
+                    }
                     for &(_, slot, as_dot) in &winners[i..j] {
                         let slot = slot as usize;
                         if let Some(g) = geom.as_ref() {

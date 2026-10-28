@@ -20,8 +20,10 @@ import tempfile
 def main() -> None:
     os.environ.setdefault("STARLET_ENGINE", "rust")
     import starlet
-    import starlet_core
     from starlet._internal.mvt import rust_engine
+
+    starlet_core = rust_engine._load()
+    assert starlet_core is not None, "starlet.starlet_core (the Rust extension) is not importable"
 
     print("starlet", starlet.__version__, "starlet_core", starlet_core.__version__, starlet_core.num_threads(), "threads")
     assert rust_engine.available(), "starlet_core not picked up by starlet"

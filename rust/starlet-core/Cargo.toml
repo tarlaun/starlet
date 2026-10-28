@@ -1,6 +1,6 @@
 [package]
 name = "starlet-core"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Rust acceleration core for starlet: on-the-fly vector tiles and parallel pyramid generation"
 license = "MIT"

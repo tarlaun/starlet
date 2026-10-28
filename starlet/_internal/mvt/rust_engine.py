@@ -1,18 +1,19 @@
-"""Optional Rust acceleration for tile generation (the ``starlet_core`` extension).
+"""Rust acceleration for tile generation (the ``starlet_core`` extension).
 
-``starlet_core`` (built from ``rust/starlet-core``) generates Mapbox Vector
-Tiles directly from a dataset's ``parquet_tiles/`` with starlet's selection
-semantics, releasing the GIL and using all cores for batches. It is entirely
-optional: when the extension is not installed every call site falls back to
-the pure-Python implementation.
+``starlet_core`` (built from ``rust/starlet-core`` into the starlet wheel as
+``starlet.starlet_core``) generates Mapbox Vector Tiles directly from a
+dataset's ``parquet_tiles/`` with starlet's selection semantics, releasing the
+GIL and using all cores for batches. It is optional: a wheel built without a
+Rust toolchain, or a platform without a prebuilt wheel, falls back to the
+pure-Python implementation at every call site.
 
 Selection is controlled by the ``STARLET_ENGINE`` environment variable:
 
 ``auto`` (default)
-    Use Rust for on-the-fly single tiles when available; batch pyramid
-    generation stays on the Python map/reduce unless explicitly requested.
+    Use Rust whenever the extension is importable, for on-the-fly single
+    tiles and for batch pyramid generation.
 ``rust``
-    Use Rust for both on-the-fly tiles and batch pyramid generation.
+    Same as ``auto`` (kept for scripts that opted in before 0.5.1).
 ``python``
     Never use the extension (kill switch).
 """
@@ -39,7 +40,10 @@ def _load() -> Any:
     with _lock:
         if _core is None and not _import_failed:
             try:
-                import starlet_core  # type: ignore
+                try:
+                    from starlet import starlet_core  # type: ignore  # built into the wheel
+                except ImportError:
+                    import starlet_core  # type: ignore  # `maturin develop` in rust/starlet-core
 
                 _core = starlet_core
             except Exception:  # ImportError or a broken build
@@ -57,8 +61,9 @@ def available() -> bool:
 
 
 def batch_enabled() -> bool:
-    """Rust is requested for batch pyramid generation (opt-in via ``STARLET_ENGINE=rust``)."""
-    return engine_setting() == "rust" and _load() is not None
+    """Rust may be used for batch pyramid generation (default when available;
+    ``STARLET_ENGINE=python`` disables it)."""
+    return engine_setting() != "python" and _load() is not None
 
 
 def version() -> Optional[str]:

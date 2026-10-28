@@ -150,14 +150,16 @@ vertex choice):
 | row groups | statistics-pruned, decoded once into an LRU (`mvt.row_group_cache`) | same (`rg_cache`) |
 | pyramid | push pass for low zooms + tile pull in a process pool (`mvt.python_pyramid = pull`); `mapreduce` keeps the old spill-to-disk path | two streaming passes (`write_pyramid`) |
 
-`STARLET_ENGINE=python` forces the Python engine; `rust` also routes batch
-pyramids through the Rust core; the default `auto` uses Rust for on-the-fly
-tiles when it is installed. `tests/test_mvt/test_rust_engine.py` asserts the
-two engines agree.
+The Rust engine is the default for on-the-fly tiles and batch pyramids
+whenever `starlet.starlet_core` imports; `STARLET_ENGINE=python` forces the
+Python engine (`rust` is accepted and means the default).
+`tests/test_mvt/test_rust_engine.py` asserts the two engines agree.
 
-## Rust acceleration core (optional)
+## Rust acceleration core
 
-`rust/starlet-core/` is a PyO3/maturin extension (`starlet_core`) that
+`rust/starlet-core/` is a PyO3 extension (`starlet.starlet_core`, built into
+the wheel by setuptools-rust from `pyproject.toml`; also buildable with
+maturin for development) that
 generates vector tiles straight from a dataset's `parquet_tiles/` with
 starlet's own selection semantics — using all cores and releasing the GIL. It
 is adapted from the [TileAQP](https://github.com/) Rust port of starlet's MVT
@@ -167,10 +169,10 @@ a hand-written MVT encoder) with starlet's `crc32(WKB)` top-k selection and
 
 starlet detects it at import (`starlet/_internal/mvt/rust_engine.py`) and
 uses it for on-the-fly tiles (`generate_single_mvt_tile`, hence `starlet
-serve`); batch pyramid generation switches to it with `STARLET_ENGINE=rust`.
-Everything falls back to Python when it is absent — pure-Python installs are
-unaffected. Users get it with `pip install "starlet[rust]"` (prebuilt abi3
-wheels from the `starlet-core` PyPI package); from source:
+serve`) and for batch pyramid generation. Everything falls back to Python
+when it is absent: the extension is marked `optional` in `pyproject.toml`, so
+`pip install .` without a Rust toolchain yields a pure-Python install. The
+PyPI wheels (abi3, one per platform) carry it prebuilt. From source:
 
 ```bash
 # once: Rust toolchain from https://rustup.rs, then
@@ -201,23 +203,25 @@ ship in the wheel.
 
 ## Continuous integration
 
-`.github/workflows/publish.yml` runs on every `v*.*.*` tag push:
+`.github/workflows/publish.yml` runs on every `v*.*.*` tag push, and without
+the publish step on `workflow_dispatch` (use that to check a build change on
+every platform before tagging):
 
-1. **test** — `pytest` on Python 3.10 / 3.11 / 3.12 (gates everything below).
-2. **build** — builds the sdist/wheel.
-3. **benchmark** — runs `.github/scripts/run_benchmark.py` on a 1 GB dataset and
+1. **test** — builds the Rust core and runs `pytest` (Python-vs-Rust parity
+   included) on Python 3.10 / 3.11 / 3.12, plus `cargo test`; gates
+   everything below.
+2. **wheels** — `cibuildwheel` on five runners (Linux x86_64 and aarch64 in
+   manylinux_2_28 containers, macOS Intel and Apple silicon, Windows x64)
+   builds one abi3 wheel each with the Rust core inside and runs the parity
+   tests and `.github/scripts/smoke_rust_size_mode.py` against the built
+   wheel. Settings live under `[tool.cibuildwheel]` in `pyproject.toml`.
+3. **sdist** — builds the sdist and checks that it installs without a Rust
+   toolchain (pure-Python fallback).
+4. **benchmark** — runs `.github/scripts/run_benchmark.py` on a 1 GB dataset and
    attaches the results to the GitHub Release. (A benchmark failure does **not**
    block the PyPI publish.)
-4. **publish** — uploads to PyPI via trusted publishing (OIDC, `pypi`
-   environment).
-
-`.github/workflows/publish-core.yml` releases the Rust extension as the
-separate PyPI package `starlet-core` on every `core-vX.Y.Z` tag push (and
-builds without publishing on `workflow_dispatch`): `cargo test`, abi3 wheels
-for Linux x86_64/aarch64, macOS arm64/x86_64 and Windows x64 via
-`PyO3/maturin-action`, an sdist, a parity-test job that installs each wheel
-next to starlet, then trusted publishing. See
-[RELEASE.md](RELEASE.md#releasing-starlet-core-the-optional-rust-extension).
+5. **publish** — uploads wheels and sdist to PyPI via trusted publishing (OIDC,
+   `pypi` environment).
 
 ## Cutting a release
 

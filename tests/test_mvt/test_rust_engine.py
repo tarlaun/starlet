@@ -16,7 +16,10 @@ import pytest
 from shapely import wkb
 from shapely.geometry import LineString, Point, Polygon
 
-starlet_core = pytest.importorskip("starlet_core")
+try:
+    from starlet import starlet_core  # built into the wheel / `pip install -e .`
+except ImportError:  # pragma: no cover - development build via `maturin develop`
+    starlet_core = pytest.importorskip("starlet_core")
 
 from starlet._internal.mvt import rust_engine  # noqa: E402
 from starlet._internal.mvt.mvt_generator import (  # noqa: E402
@@ -96,6 +99,7 @@ def test_dispatcher_uses_rust_and_kill_switch_falls_back(tmp_path, monkeypatch):
     rust_engine.invalidate()
     monkeypatch.delenv(rust_engine.ENV_VAR, raising=False)
     assert rust_engine.available()
+    assert rust_engine.batch_enabled()  # Rust is the default batch engine when installed
     via_dispatch = generate_single_mvt_tile(str(ds), (1, 0, 0), feature_capacity=10)
     assert _props(via_dispatch) == _props(
         rust_engine.generate_tile(str(ds), 1, 0, 0, feature_capacity=10, extent=4096, buffer=256)
@@ -229,3 +233,37 @@ def test_geometry_column_named_in_geo_metadata(tmp_path):
     rs = rust_engine.generate_tile(str(ds), 1, 0, 0, feature_capacity=10, extent=4096, buffer=256)
     assert _props(rs) == _props(py)
     assert {dict(p)["id"] for p in _props(rs)} == {1, 2, 3}
+
+
+def test_nested_map_and_struct_attributes_flatten_like_python(tmp_path):
+    """Map and struct columns become dotted attributes (``tags.name``) in both
+    engines; non-string map keys fall back to the string form of the value."""
+    root = tmp_path / "ds"
+    (root / "parquet_tiles").mkdir(parents=True)
+    table = pa.table(
+        {
+            "geometry": [wkb.dumps(Point(-100.0, 80.0)), wkb.dumps(Point(-99.0, 79.0))],
+            "id": [1, 2],
+            "tags": pa.array(
+                [[("name", "Oak Hill"), ("landuse", "cemetery")], [("name", "Elm")]],
+                type=pa.map_(pa.string(), pa.string()),
+            ),
+            "meta": pa.array(
+                [{"source": "osm", "rank": 3}, {"source": None, "rank": 7}],
+                type=pa.struct([("source", pa.string()), ("rank", pa.int64())]),
+            ),
+            "_bbox_xmin": [-100.0, -99.0],
+            "_bbox_ymin": [80.0, 79.0],
+            "_bbox_xmax": [-100.0, -99.0],
+            "_bbox_ymax": [80.0, 79.0],
+        }
+    ).replace_schema_metadata({b"geo": json.dumps(GEO).encode("utf-8")})
+    pq.write_table(table, root / "parquet_tiles" / "tile_000000__-100_0_79_0_-99_0_80_0.parquet")
+
+    rust_props = _props(rust_engine.generate_tile(str(root), 1, 0, 0, feature_capacity=10, extent=4096, buffer=256))
+    python_props = _props(_generate_single_mvt_tile_python(str(root), (1, 0, 0), feature_capacity=10))
+    assert rust_props == python_props
+    assert rust_props == {
+        (("id", 1), ("meta.rank", 3), ("meta.source", "osm"), ("tags.landuse", "cemetery"), ("tags.name", "Oak Hill")),
+        (("id", 2), ("meta.rank", 7), ("tags.name", "Elm")),
+    }

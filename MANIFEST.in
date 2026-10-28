@@ -1,0 +1,10 @@
+# sdist contents beyond the Python package: the Rust acceleration core, so
+# `pip install starlet` from the sdist can compile it (or skip it when no Rust
+# toolchain is present).
+include rust/starlet-core/Cargo.toml
+include rust/starlet-core/Cargo.lock
+include rust/starlet-core/README.md
+graft rust/starlet-core/src
+prune rust/starlet-core/target
+include README.md
+global-exclude __pycache__ *.py[cod]

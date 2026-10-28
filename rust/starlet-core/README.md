@@ -7,21 +7,19 @@ at import time and uses it for:
 
 - **on-the-fly tiles** served past the pre-generated zoom levels
   (`generate_single_mvt_tile`, hence `starlet serve`), and
-- **batch pyramid generation** (`starlet mvt` / `generate_mvt`) when opted in.
+- **batch pyramid generation** (`starlet mvt` / `generate_mvt`).
 
 Without it, starlet runs its pure-Python pipeline unchanged.
 
 ## Install
 
-Prebuilt abi3 wheels (Linux x86_64/aarch64, macOS arm64/x86_64, Windows x64;
-any CPython >= 3.10) are on PyPI as `starlet-core`:
+The starlet wheels on PyPI (Linux x86_64/aarch64, macOS arm64/x86_64, Windows
+x64; abi3, any CPython >= 3.10) include this extension as
+`starlet.starlet_core`; `pip install starlet` is all that is needed. Installing
+starlet from source compiles it when a Rust toolchain is present (setuptools-rust,
+see the root `pyproject.toml`) and skips it otherwise.
 
-```bash
-pip install "starlet[rust]"     # starlet + starlet-core
-pip install starlet-core        # just the extension
-```
-
-## Build from source
+## Build from source (development)
 
 ```bash
 # Rust toolchain (once): https://rustup.rs
@@ -44,8 +42,8 @@ python -c "import starlet_core; print(starlet_core.__version__, starlet_core.num
 
 | value | on-the-fly tiles | batch pyramid (`starlet mvt`) |
 |---|---|---|
-| `auto` (default) | Rust when available | Python map/reduce |
-| `rust` | Rust | **Rust** (pull-based, parallel) |
+| `auto` (default) | Rust when available | Rust when available |
+| `rust` | same as `auto` | same as `auto` |
 | `python` | Python | Python |
 
 ## How it works

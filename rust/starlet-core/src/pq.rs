@@ -168,6 +168,57 @@ pub fn arrow_value(arr: &ArrayRef, row: usize) -> Option<Value> {
     })
 }
 
+/// Attribute values of one cell under `name`, flattened like starlet's
+/// `_flatten_property_items`: a Struct contributes one `name.field` per
+/// non-null field, a Map with string keys one `name.key` per non-null entry
+/// (recursively); every other type is a single scalar via [`arrow_value`].
+pub fn arrow_values(arr: &ArrayRef, row: usize, name: &str, out: &mut Vec<(String, Value)>) {
+    if arr.is_null(row) {
+        return;
+    }
+    match arr.data_type() {
+        DataType::Struct(fields) => {
+            let s = arr.as_struct();
+            for (field, child) in fields.iter().zip(s.columns()) {
+                arrow_values(child, row, &format!("{name}.{}", field.name()), out);
+            }
+        }
+        DataType::Map(_, _) => {
+            let m = arr.as_map();
+            let entries = m.value(row);
+            let keys = entries.column(0);
+            let values = entries.column(1);
+            let key_at = |i: usize| -> Option<String> {
+                if keys.is_null(i) {
+                    return None;
+                }
+                match keys.data_type() {
+                    DataType::Utf8 => Some(keys.as_string::<i32>().value(i).to_string()),
+                    DataType::LargeUtf8 => Some(keys.as_string::<i64>().value(i).to_string()),
+                    DataType::Utf8View => Some(keys.as_string_view().value(i).to_string()),
+                    _ => None,
+                }
+            };
+            if (0..entries.len()).any(|i| key_at(i).is_none()) {
+                // Non-string keys: Python keeps the whole value as its string form.
+                if let Some(v) = arrow_value(arr, row) {
+                    out.push((name.to_string(), v));
+                }
+                return;
+            }
+            for i in 0..entries.len() {
+                let key = key_at(i).unwrap();
+                arrow_values(values, i, &format!("{name}.{key}"), out);
+            }
+        }
+        _ => {
+            if let Some(v) = arrow_value(arr, row) {
+                out.push((name.to_string(), v));
+            }
+        }
+    }
+}
+
 /// Raw WKB bytes of a (Large)Binary cell.
 #[inline]
 pub fn wkb_at(b: &RecordBatch, col: usize, i: usize) -> Option<&[u8]> {

@@ -26,11 +26,14 @@ This installs the `starlet` command-line tool. Check it:
 starlet --version
 ```
 
-For the optional Rust acceleration (on-the-fly tiles and pyramids 5–30×
-faster; prebuilt wheels for Linux, macOS and Windows, any Python ≥ 3.10):
+The wheels for Linux (x86_64, aarch64), macOS (Intel, Apple silicon) and
+Windows include the Rust acceleration core, which starlet uses automatically
+(on-the-fly tiles and pyramids 5–30× faster than the Python engine). On other
+platforms `pip` builds from source: with a Rust toolchain installed the core is
+compiled, without one starlet installs with its pure-Python engine. Check:
 
 ```bash
-pip install "starlet[rust]"
+python -c "from starlet._internal.mvt import rust_engine; print(rust_engine.available())"
 ```
 
 For local development and testing, install the project with dev dependencies:
@@ -212,12 +215,12 @@ dataset even without pre-generating every zoom.
 Tile generation is vectorised (numpy + shapely arrays, a numpy MVT encoder,
 a bounded cache of decoded Parquet row groups), so the pure-Python install
 serves on-the-fly tiles in milliseconds at high zoom and builds pyramids
-without intermediate files. An optional Rust core (`starlet_core`, the
-`starlet-core` package on PyPI, source in `rust/starlet-core`) produces the
-same tiles another 5–30× faster and is used automatically when installed
-(`pip install "starlet[rust]"`; set `STARLET_ENGINE=rust` to also use it for
-batch pyramids). See
-[DEVELOPMENT.md](DEVELOPMENT.md#rust-acceleration-core-optional).
+without intermediate files. The Rust core shipped in the wheels
+(`starlet.starlet_core`, source in `rust/starlet-core`) produces the same
+tiles another 5–30× faster and is the default engine for both on-the-fly
+tiles and pyramids whenever it is present; `STARLET_ENGINE=python` switches
+it off. See
+[DEVELOPMENT.md](DEVELOPMENT.md#rust-acceleration-core).
 
 ## Configuration
 

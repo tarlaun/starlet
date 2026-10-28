@@ -41,7 +41,7 @@ use crate::geom::simplify::{signed_area, simplify_dp};
 use crate::geom::{lonlat_to_merc, merc_bbox_to_lonlat, GeomKind, Geometry, TileId, TileTransform};
 use std::collections::HashMap;
 use crate::mvt::{LayerBuilder, TileWriter};
-use crate::pq::{arrow_value, parse_filename_bbox, wkb_at, PqFile, BBOX_COLS, INTERNAL_COLS};
+use crate::pq::{arrow_values, parse_filename_bbox, wkb_at, PqFile, BBOX_COLS, INTERNAL_COLS};
 
 pub const LAYER_NAME: &str = "layer0";
 /// Display pixels per tile side used for the sub-pixel grid: a feature whose
@@ -380,6 +380,7 @@ impl Dataset {
         winners.extend(cells.into_values().map(|(_, q, s, r)| (q, s, r, true)));
         winners.sort_unstable(); // deterministic feature order (offer order)
         let mut dots = DotBuffer::default();
+        let mut flat: Vec<(String, crate::mvt::Value)> = Vec::new();
         for (_, slot, row, as_dot) in winners {
             let (rgc, bi, pi) = &batches[slot];
             let b = &rgc.batches[*bi];
@@ -399,14 +400,16 @@ impl Dataset {
             tags.clear();
             let bare = strip_point_attrs && tg.kind == GeomKind::Point && sub_pixel(&tg, p);
             if !bare {
+                flat.clear();
                 for name in part.attr_cols.iter().filter(|n| p.attrs.allows(n)) {
                     if let Ok(ci) = b.schema().index_of(name) {
-                        if let Some(v) = arrow_value(b.column(ci), row as usize) {
-                            let ki = layer.key(name);
-                            let vi = layer.value(&v);
-                            tags.push((ki, vi));
-                        }
+                        arrow_values(b.column(ci), row as usize, name, &mut flat);
                     }
+                }
+                for (key, v) in &flat {
+                    let ki = layer.key(key);
+                    let vi = layer.value(v);
+                    tags.push((ki, vi));
                 }
             }
             layer.add_feature(None, &tg, &tags);
@@ -481,9 +484,7 @@ impl Dataset {
                         let mut attrs = Vec::with_capacity(part.attr_cols.len());
                         for name in &part.attr_cols {
                             if let Ok(ci) = b.schema().index_of(name) {
-                                if let Some(v) = arrow_value(b.column(ci), i) {
-                                    attrs.push((name.clone(), v));
-                                }
+                                arrow_values(b.column(ci), i, name, &mut attrs);
                             }
                         }
                         hits.push(Hit { bbox: rb, kind: g.kind, attrs });
