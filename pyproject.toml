@@ -70,7 +70,7 @@ dev = [
 # platform; the result is tagged cp310-abi3-<platform>.
 [tool.cibuildwheel]
 build = "cp310-*"
-skip = ["*-musllinux*", "pp*"]
+skip = ["*-musllinux*"]
 build-verbosity = 1
 test-requires = ["pytest", "pytest-cov", "pytest-mock"]
 test-command = [

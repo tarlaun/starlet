@@ -12,7 +12,10 @@ import multiprocessing
 import os
 from pathlib import Path
 import random
-import resource
+try:
+    import resource  # Unix only; peak-RSS diagnostics are skipped on Windows
+except ImportError:  # pragma: no cover - Windows
+    resource = None
 import shutil
 import sys
 import tempfile
@@ -1097,12 +1100,14 @@ def _process_rss_mib() -> tuple[float | None, float | None]:
         except (OSError, ValueError, IndexError):
             pass
 
-    try:
-        peak = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        # Linux reports KiB; macOS and the BSDs report bytes.
-        peak /= _MIB if sys.platform == "darwin" else 1024.0
-    except (OSError, ValueError):
-        peak = None
+    peak = None
+    if resource is not None:
+        try:
+            peak = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            # Linux reports KiB; macOS and the BSDs report bytes.
+            peak /= _MIB if sys.platform == "darwin" else 1024.0
+        except (OSError, ValueError):
+            peak = None
     return current, peak
 
 
