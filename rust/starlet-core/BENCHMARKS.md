@@ -174,7 +174,8 @@ E5-2609 v4 @ 1.7 GHz, 125 GB; `starlet tile` defaults, then `starlet mvt
 --zoom 7 --threshold 0 --feature-capacity 25000`, all attributes), run on
 `master` @ 15fa94b on 2026-10-05. OSM-Parks extracts: 25/50/75/100% of the
 9.96M-polygon 2015 extract and the full OSM21 parks (42.77M polygons,
-17.6 GB, 1.16 B vertices, geometry column `wkb_geometry`).
+17.6 GB, 1.16 B vertices, geometry column `wkb_geometry`). The 200% row (2026-10-27) is the 100% file concatenated with itself (same row
+groups twice, zstd; 19.92M rows) to fill the gap between 5.6 and 17.6 GB.
 
 | subset | polygons | input | tile s | Rust MVT s | Python MVT s | tiles | MVT MB |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -182,6 +183,7 @@ E5-2609 v4 @ 1.7 GHz, 125 GB; `starlet tile` defaults, then `starlet mvt
 | 50% | 4.98M | 2.9 GB | 155 | 12 | 147 | 2,650 | 221 |
 | 75% | 7.47M | 3.9 GB | 218 | 16 | 155 | 3,222 | 257 |
 | 100% | 9.96M | 5.6 GB | 296 | 20 | 208 | 4,269 | 360 |
+| 200% (100% ×2) | 19.92M | 11.1 GB | 585 | 28 | 333 | 4,269 | 464 |
 | OSM21 | 42.77M | 17.6 GB | 1,231 | 45 | 835 | 5,747 | 791 |
 | Overture US buildings | 179.37M | 20.1 GB | 4,968 | 73 | 180 | 341 | 97 |
 
